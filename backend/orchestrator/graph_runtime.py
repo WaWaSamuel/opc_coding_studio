@@ -20,15 +20,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from backend.core.event_bus import EventBus
+from backend.orchestrator.decision_gate import DecisionGate
 from backend.orchestrator.edges import Decision, decide_from_verdict
 from backend.orchestrator.loop import LoopController
 from backend.orchestrator.node_runner import NodeRunner
 from backend.orchestrator.rule_checks import run_rule_checks
-from backend.schema import Artifact, CompanyState, TaskStatus
+from backend.schema import Artifact, ArtifactStatus, CompanyState, TaskStatus
 
 EventSink = Callable[[dict[str, Any]], None]
 
 _LOOP_KEY = "build-quality"
+
+# 图级里程碑事件落库(审计真源);节点级细粒度事件只推流不落库(NodeRunner 已处理)。
+_PERSIST_GRAPH_EVENTS = frozenset({
+    "graph_start", "ceo_route", "dev_plan", "build", "rule_check", "loop_judge",
+    "acceptance", "rework", "need_decision", "decision", "handoff",
+    "graph_done", "done", "error",
+})
 
 
 @dataclass
@@ -46,10 +55,14 @@ class RuntimeGraph:
         runner: NodeRunner,
         loop: LoopController | None = None,
         event_sink: EventSink | None = None,
+        event_bus: EventBus | None = None,
+        decision_gate: DecisionGate | None = None,
     ) -> None:
         self._runner = runner
         self._loop = loop or LoopController()
         self._sink = event_sink
+        self._bus = event_bus
+        self._gate = decision_gate
         self._events: list[dict[str, Any]] = []
 
     def _emit(self, event: str, **kw: Any) -> None:
@@ -57,9 +70,19 @@ class RuntimeGraph:
         self._events.append(e)
         if self._sink:
             self._sink(e)
+        # M4:图级里程碑同步推 EventBus(落库 + 推流给界面/飞书)
+        if self._bus is not None and event in _PERSIST_GRAPH_EVENTS:
+            task_id = kw.get("task_id") or getattr(self, "_task_id", "")
+            payload = {k: v for k, v in kw.items() if k != "task_id"}
+            # graph_done 归一为统一信封的 done(SSE 据此收流)
+            bus_event = "done" if event == "graph_done" else event
+            self._bus.emit(task_id, bus_event, role="orchestrator",
+                           payload=payload, persist=True)
 
     def run(self, state: CompanyState, goal: str) -> RuntimeResult:
         self._events = []
+        self._task_id = state.task_id
+        self._goal = goal
         self._emit("graph_start", task_id=state.task_id, goal=goal)
 
         # ── 1. CEO 路由分流(F-B.3)─────────────────────────────
@@ -68,15 +91,34 @@ class RuntimeGraph:
         is_major = bool(ceo.data.get("is_major", False))
         self._emit("ceo_route", department=department, is_major=is_major)
 
+        # ── 1.5 重大需求 → PM 部门产出结构化 PRD(F-B.5)──────────
+        upstream_for_lead: Artifact = ceo
+        prd_acceptance: list[str] = []
+        if is_major:
+            prd_task = (
+                f"宿主需求(重大):{goal}\n"
+                f"CEO 路由:目标部门={department}。\n"
+                "请产出结构化 PRD,requirements[].acceptance 为可逐条核对的验收标准。"
+            )
+            prd = self._runner.run(state, "pm-prd-agent", prd_task, upstream=ceo)
+            self._emit("handoff", frm="pm-prd-agent", to="dev-lead-agent",
+                       requirements=len(prd.data.get("requirements", [])))
+            upstream_for_lead = prd
+            for req in prd.data.get("requirements", []):
+                prd_acceptance.extend(req.get("acceptance", []) or [])
+
         # ── 2. 开发部长拆解 + TODO Plan(F-B.4)──────────────────
         lead_task = (
             f"业务目标:{goal}\n"
             f"CEO 路由:目标部门={department}, 是否重大={is_major}。\n"
-            "请拆解为可执行的 TODO Plan,并给出每条验收标准(acceptance)。"
+            + (f"PM 已产出 PRD,验收标准:{prd_acceptance}\n" if prd_acceptance else "")
+            + "请拆解为可执行的 TODO Plan,并给出每条验收标准(acceptance)。"
         )
-        plan = self._runner.run(state, "dev-lead-agent", lead_task, upstream=ceo)
+        plan = self._runner.run(
+            state, "dev-lead-agent", lead_task, upstream=upstream_for_lead
+        )
         todo_plan: list[dict[str, Any]] = plan.data.get("todo_plan", [])
-        acceptance: list[str] = plan.data.get("acceptance", [])
+        acceptance: list[str] = plan.data.get("acceptance", []) or prd_acceptance
         state.todo_plan = todo_plan
         self._emit("dev_plan", todo_items=len(todo_plan), acceptance=len(acceptance))
 
@@ -242,6 +284,70 @@ class RuntimeGraph:
         state.status = TaskStatus.NEED_DECISION
         self._runner.checkpoint(state)
         self._emit("need_decision", note=note)
+
+        # 无 gate(M2 离线/测试)→ 直接返回 NEED_DECISION 由调用方处理。
+        if self._gate is None:
+            return RuntimeResult(
+                state, TaskStatus.NEED_DECISION, final, note, self._events
+            )
+
+        # F-A.7 人在环:阻塞等 Host 回灌(POST /decision 或飞书卡片按钮)。
+        decision = self._gate.wait(state.task_id)
+        if decision is None:
+            # 超时未回灌:保守收口,仍置 need_decision 不无限挂。
+            self._emit("need_decision", note=f"{note}(等待 Host 决策超时)")
+            return RuntimeResult(
+                state, TaskStatus.NEED_DECISION, final,
+                f"{note}(超时)", self._events,
+            )
+
+        self._emit("decision", verdict=decision.verdict, reason=decision.reason)
+        if decision.verdict == "pass":
+            # Host 拍板放行:重置回退计数,做最终汇总收口。
+            state.loop_counters[_LOOP_KEY] = 0
+            summary = self._runner.run(
+                state, "dev-lead-agent",
+                f"业务目标:{self._goal}\nHost 已拍板放行(理由:{decision.reason})。"
+                "请基于当前交付物做最终汇总,回报 CEO。",
+                upstream=final,
+            )
+            state.status = TaskStatus.DONE
+            self._runner.checkpoint(state)
+            self._emit("graph_done", task_id=state.task_id)
+            return RuntimeResult(state, TaskStatus.DONE, summary,
+                                 "Host 决策放行后收口", self._events)
+
+        if decision.verdict == "reject":
+            # Host 要求继续返工:重置计数后再走一轮构建链路。
+            state.loop_counters[_LOOP_KEY] = 0
+            state.status = TaskStatus.RUNNING
+            if final is not None:
+                feedback = final.model_copy(deep=True)
+            else:
+                feedback = Artifact(role="host", task_id=state.task_id,
+                                    status=ArtifactStatus.NEED_REWORK)
+            feedback.data = {
+                "verdict": "reject",
+                "failed_checks": [decision.reason] if decision.reason else [],
+                "suggestion": decision.suggestion or "按 Host 意见返工。",
+            }
+            return self._rerun_tail(
+                state, self._goal, state.todo_plan,
+                self._acceptance_from_state(state), feedback,
+            )
+
+        # abort 或未知:终止任务报 Host。
+        state.status = TaskStatus.NEED_DECISION
+        self._runner.checkpoint(state)
         return RuntimeResult(
-            state, TaskStatus.NEED_DECISION, final, note, self._events
+            state, TaskStatus.NEED_DECISION, final,
+            f"Host 选择终止: {decision.reason}", self._events,
         )
+
+    @staticmethod
+    def _acceptance_from_state(state: CompanyState) -> list[str]:
+        for art in reversed(state.artifacts):
+            acc = art.data.get("acceptance")
+            if acc:
+                return acc
+        return []

@@ -1,0 +1,23 @@
+# 一人公司 AI Agent 系统 — 两服务编排(PRD v4.2 §5.7)
+# 启动:docker compose up --build
+# 密钥纪律:真实密钥只在根目录 .env(gitignore);仓库仅 .env.example 占位。
+services:
+  backend:          # FastAPI + 编排 + 飞书长连接(出站 WS,免公网回调)
+    build: ./backend
+    env_file: .env  # ARK_* / GITHUB_TOKEN / LARK_* / API_* / 熔断阈值
+    environment:
+      - DB_PATH=/app/data/app.db
+    volumes:
+      - ./data:/app/data            # SQLite 状态/日志/记忆持久化
+      - ./workflows:/app/workflows  # 业务工作流定义(git 真源)
+    ports:
+      - "8000:8000"                 # Web 渠道 + 界面 API(开发期直连后端用)
+    restart: unless-stopped
+
+  frontend:         # Vite 构建产物 + nginx 静态服务(/api 反代到 backend)
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+    restart: unless-stopped

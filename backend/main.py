@@ -1,66 +1,49 @@
-"""M1 最小内核闭环演示。
+"""进程入口:一处装配 OrchestratorService,多渠道复用(M4 入口层)。
 
-跑通:单角色被调一次 → 产出合法 Artifact → 落 Checkpoint → 断点可恢复
-     → token 被记账(可触发熔断)。
+  - FastAPI(uvicorn):Web 渠道 + 界面 API(POST /command、GET /events SSE…)。
+  - 飞书长连接(LarkAdapter):出站 WS,免公网回调;后台守护线程跑。
 
-默认 MockAdapter(离线,无需密钥);MODEL_PROVIDER=ark 接真实豆包。
-运行(仓库根目录): python -m backend.main
+两个入口共用同一个 OrchestratorService 实例(同一 EventBus/DecisionGate/Repo),
+所以 Web 与飞书互通:飞书发起的任务也能在 Web 界面看事件流,反之亦然。
+
+用法:
+  env -u ARK_MODEL .venv/bin/python -m backend.main         # 默认 web + lark
+  OPC_ENABLE_LARK=0 .venv/bin/python -m backend.main         # 只起 Web
 """
 from __future__ import annotations
 
-import uuid
+import os
 
+import uvicorn
+
+from backend.api.app import create_app
 from backend.config import settings
-from backend.core.cost_guard import CostGuard
-from backend.core.model_adapter.factory import build_adapter
-from backend.core.roles.registry import RoleRegistry
-from backend.orchestrator.node_runner import NodeRunner
-from backend.repo.checkpoint_store import CheckpointStore
-from backend.repo.sqlite_repo import SqliteRepo
-from backend.schema import CompanyState
+from backend.orchestrator.service import OrchestratorService
+
+
+def _truthy(val: str | None, default: bool) -> bool:
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
 
 def main() -> None:
-    print(f"[M1] provider={settings.model_provider} db={settings.db_path}")
+    service = OrchestratorService()
 
-    repo = SqliteRepo(settings.db_path)
-    adapter = build_adapter()
-    registry = RoleRegistry()
-    cost = CostGuard(repo)
-    ckpt = CheckpointStore(repo)
-    runner = NodeRunner(adapter, registry, repo, cost, ckpt)
+    # 飞书长连接:有凭据且未显式关闭则起后台线程
+    enable_lark = _truthy(os.getenv("OPC_ENABLE_LARK"), default=True)
+    if enable_lark and settings.lark_app_id and settings.lark_app_secret:
+        from backend.gateway.lark_adapter import LarkAdapter
 
-    print(f"[M1] 已注册角色: {registry.list_ids()}")
+        adapter = LarkAdapter(service)
+        adapter.start()
+        print("[main] 飞书长连接已启动(出站 WebSocket)")
+    else:
+        print("[main] 飞书长连接未启用(缺 LARK_APP_ID/SECRET 或 OPC_ENABLE_LARK=0)")
 
-    task_id = f"demo-{uuid.uuid4().hex[:8]}"
-    state = CompanyState(task_id=task_id, workflow="m1-smoke")
-
-    artifact = runner.run(
-        state,
-        role_id="backend-engineer-agent",
-        task_text="实现一个返回当前时间的 HTTP 接口,给出文件清单与摘要。",
-    )
-
-    print(f"\n[M1] 产出 Artifact: status={artifact.status.value} "
-          f"files={artifact.artifact.files}")
-    print(f"[M1] 任务累计 token: {state.task_tokens}")
-
-    # 断点恢复演示(F-D.4)
-    restored = ckpt.restore(task_id)
-    assert restored is not None, "checkpoint 恢复失败"
-    assert restored.artifacts and restored.artifacts[-1].status == artifact.status
-    print(f"[M1] 断点恢复成功: task_id={restored.task_id} "
-          f"artifacts={len(restored.artifacts)} transition='{restored.transition}'")
-
-    # 流转日志(F-A.6)
-    logs = repo.logs_for(task_id)
-    print(f"[M1] 流转日志 {len(logs)} 条:")
-    for e in logs:
-        print(f"   - {e['event']:<16} role={e['role']} tokens={e['tokens']} "
-              f"task_tokens={e['task_tokens']}")
-
-    repo.close()
-    print("\n[M1] 闭环完成 ✓")
+    app = create_app(service)
+    print(f"[main] API 监听 http://{settings.api_host}:{settings.api_port}")
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,16 @@
+# 密钥与数据绝不入镜像(密钥纪律:仅经 env_file 注入)
+.env
+data/
+*.db
+*.db-journal
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 文档与本地产物
+*.md
+.DS_Store

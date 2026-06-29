@@ -1,6 +1,15 @@
-# M1 最小内核仅需以下依赖(API 服务/前端在 M4);Python 3.9+
+# 一人公司 AI Agent 后端依赖(Python 3.9+)
+# M1~M3 内核
 pydantic==2.9.2
 pydantic-settings==2.5.2
 httpx==0.27.2
-pytest==8.3.3
 PyYAML==6.0.2
+
+# M4 入口层 / API 服务 / 飞书长连接
+fastapi==0.115.14
+uvicorn[standard]==0.39.0
+sse-starlette==3.0.3
+lark-oapi==1.6.9
+
+# 测试
+pytest==8.3.3

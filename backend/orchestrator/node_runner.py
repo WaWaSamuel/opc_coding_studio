@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 
 from backend.core.cost_guard import CostGuard
+from backend.core.event_bus import EventBus
 from backend.core.memory import MemoryManager
 from backend.core.model_adapter.base import ModelAdapter
 from backend.core.retrieval import PrefixCache, Retriever
@@ -36,6 +37,7 @@ class NodeRunner:
         retry: RetryController | None = None,
         memory: MemoryManager | None = None,
         prefix_cache: PrefixCache | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._adapter = adapter
         self._registry = registry
@@ -47,6 +49,9 @@ class NodeRunner:
         self._memory = memory
         self._retriever = Retriever(memory) if memory is not None else None
         self._prefix_cache = prefix_cache
+        # M4:事件总线(可选)。节点级 token 仍以 repo._log 为成本真源;
+        # EventBus 这里只做实时流式推送(persist=False),避免重复落库双计。
+        self._bus = event_bus
 
     def run(
         self,
@@ -59,6 +64,10 @@ class NodeRunner:
         state.current_role = role_id
         if upstream is None:
             upstream = state.artifacts[-1] if state.artifacts else None
+
+        # M4:角色起手事件(实时流式;不落库,审计真源仍是 _log 的 tool_call/artifact)
+        self._stream(state.task_id, "role_start", role_id,
+                     {"task_text": task_text[:200]})
 
         # F-C.5 检索式记忆注入(置于 CACHE_BOUNDARY 前稳定区)
         memory_block = ""
@@ -87,9 +96,16 @@ class NodeRunner:
                 tier["value"] = "small"  # 软限:后续调用降档小模型
                 self._log(state, "cost_soft_limit", role_id, tokens=res.tokens_total,
                           latency_ms=res.latency_ms, note=f"task_tokens={check.task_tokens}")
+                self._stream(state.task_id, "cost_soft_limit", role_id,
+                             {"task_tokens": check.task_tokens},
+                             tokens_in=res.tokens_in, tokens_out=res.tokens_out,
+                             latency_ms=res.latency_ms)
             else:
                 self._log(state, evt, role_id, tokens=res.tokens_total,
                           latency_ms=res.latency_ms)
+                self._stream(state.task_id, "tool_call", role_id, {"kind": evt},
+                             tokens_in=res.tokens_in, tokens_out=res.tokens_out,
+                             latency_ms=res.latency_ms)
 
         def _invoke_once() -> Artifact:
             """一次完整节点调用:模型 invoke + JSON 自修复。
@@ -98,6 +114,8 @@ class NodeRunner:
             或模型 API 5xx/限流,会抛 SelfRepairExhausted/ModelCallError,
             交外层 RetryController 做节点级原地重试(F-D.2,与业务回退独立)。
             """
+            self._stream(state.task_id, "thinking", role_id,
+                         {"note": "组装上下文并调用模型"})
             first = self._adapter.invoke(
                 messages, schema=role.output_schema, tier=tier["value"]
             )
@@ -122,6 +140,8 @@ class NodeRunner:
         def _on_retry(n: int, exc: Exception) -> None:
             self._log(state, "node_retry", role_id, tokens=0, latency_ms=0,
                       note=f"attempt={n} err={type(exc).__name__}: {exc}")
+            self._stream(state.task_id, "node_retry", role_id,
+                         {"attempt": n, "error": f"{type(exc).__name__}: {exc}"})
 
         artifact = self._retry.run(
             state, f"node:{role_id}", _invoke_once, on_retry=_on_retry
@@ -135,6 +155,11 @@ class NodeRunner:
         self._ckpt.save(state)
         self._log(state, "artifact", role_id, tokens=0, latency_ms=0,
                   note=artifact.status.value)
+        self._stream(state.task_id, "artifact", role_id, {
+            "status": artifact.status.value,
+            "files": artifact.artifact.files,
+            "summary": artifact.artifact.summary[:200],
+        })
         return artifact
 
     def checkpoint(self, state: CompanyState) -> None:
@@ -156,3 +181,13 @@ class NodeRunner:
                 "note": note,
             }
         )
+
+    def _stream(self, task_id: str, event: str, role: str,
+                payload: dict, *, tokens_in: int = 0, tokens_out: int = 0,
+                latency_ms: int = 0) -> None:
+        """实时推流到 EventBus(不落库,审计真源是 _log)。无 bus 时静默跳过。"""
+        if self._bus is None:
+            return
+        self._bus.emit(task_id, event, role=role, payload=payload,
+                       tokens_in=tokens_in, tokens_out=tokens_out,
+                       latency_ms=latency_ms, persist=False)
