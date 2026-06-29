@@ -38,6 +38,8 @@ class Artifact(BaseModel):
     handoff_notes: str = ""
     issues: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
+    # 角色专属结构化载荷:CEO 路由 / 部长 TODO / Loop verdict 等(F-B.3/B.4/B.7)
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class CompanyState(BaseModel):

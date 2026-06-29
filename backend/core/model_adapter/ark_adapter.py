@@ -49,7 +49,7 @@ class ArkAdapter(ModelAdapter):
         for attempt in range(settings.max_api_overload_retry):
             start = time.monotonic()
             try:
-                with httpx.Client(timeout=120.0) as client:
+                with httpx.Client(timeout=settings.ark_timeout_seconds) as client:
                     resp = client.post(url, json=body, headers=headers)
                 if resp.status_code >= 500 or resp.status_code == 429:
                     raise ModelCallError(f"ark {resp.status_code}: {resp.text[:200]}")

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     ark_model: str = ""
     ark_model_small: str = ""
+    ark_timeout_seconds: float = 300.0  # 单次模型调用读超时(慢端点/长输出留余量)
 
     # Persistence (F-F.2)
     db_path: str = "./data/app.db"
@@ -27,6 +28,9 @@ class Settings(BaseSettings):
     # Reliability (F-D.3)
     max_self_repair: int = 3
     max_api_overload_retry: int = 3
+
+    # Business loop / rework (F-D.1 业务回退上限,超限置 need_decision)
+    max_loop_iterations: int = 3
 
 
 settings = Settings()

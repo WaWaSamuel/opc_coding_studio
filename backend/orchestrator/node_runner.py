@@ -37,10 +37,17 @@ class NodeRunner:
         self._cost = cost_guard
         self._ckpt = checkpoints
 
-    def run(self, state: CompanyState, role_id: str, task_text: str) -> Artifact:
+    def run(
+        self,
+        state: CompanyState,
+        role_id: str,
+        task_text: str,
+        upstream: Artifact | None = None,
+    ) -> Artifact:
         role = self._registry.get(role_id)
         state.current_role = role_id
-        upstream = state.artifacts[-1] if state.artifacts else None
+        if upstream is None:
+            upstream = state.artifacts[-1] if state.artifacts else None
         messages = PromptComposer.compose(role, task_text, upstream)
 
         # 成本熔断可能在记账时抛出 → 先记 role_start
@@ -84,6 +91,10 @@ class NodeRunner:
         self._log(state, "artifact", role_id, tokens=0, latency_ms=0,
                   note=artifact.status.value)
         return artifact
+
+    def checkpoint(self, state: CompanyState) -> None:
+        """图级别落盘(节点流转之外的状态变更,如最终 status)。"""
+        self._ckpt.save(state)
 
     def _log(self, state: CompanyState, event: str, role: str, *, tokens: int,
              latency_ms: int, note: str = "") -> None:
