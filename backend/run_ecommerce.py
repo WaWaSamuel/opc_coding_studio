@@ -14,7 +14,9 @@ import uuid
 
 from backend.config import settings
 from backend.core.cost_guard import CostGuard
+from backend.core.memory import MemoryManager
 from backend.core.model_adapter.factory import build_adapter
+from backend.core.retrieval import PrefixCache
 from backend.core.roles.registry import RoleRegistry
 from backend.orchestrator.graph_runtime import RuntimeGraph
 from backend.orchestrator.loop import LoopController
@@ -33,7 +35,14 @@ def main() -> None:
     registry = RoleRegistry()
     cost = CostGuard(repo)
     ckpt = CheckpointStore(repo)
-    runner = NodeRunner(adapter, registry, repo, cost, ckpt)
+    # M3 harness 接入主链路:检索式记忆注入(F-C.5)+ 稳定前缀缓存统计(F-C.6)。
+    # 节点重试(F-D.2)由 NodeRunner 内部默认启用,无需显式注入。
+    memory = MemoryManager(repo, namespace="runtime")
+    prefix_cache = PrefixCache()
+    runner = NodeRunner(
+        adapter, registry, repo, cost, ckpt,
+        memory=memory, prefix_cache=prefix_cache,
+    )
 
     print(f"[M2] 已注册角色: {registry.list_ids()}")
 
@@ -54,6 +63,9 @@ def main() -> None:
     print(f"[M2] 备注: {res.note}")
     print(f"[M2] 任务累计 token: {state.task_tokens}")
     print(f"[M2] 业务回退计数: {state.loop_counters}")
+    print(f"[M2] 节点重试计数: {state.retry_counters}")
+    print(f"[M3] 前缀缓存命中率: {prefix_cache.hit_rate:.0%} "
+          f"(hits={prefix_cache.hits} misses={prefix_cache.misses})")
     if res.final_artifact:
         print(f"[M2] 最终交付: files={res.final_artifact.artifact.files} "
               f"summary={res.final_artifact.artifact.summary[:60]}")

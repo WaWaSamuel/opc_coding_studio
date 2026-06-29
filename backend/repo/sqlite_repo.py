@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,20 @@ CREATE TABLE IF NOT EXISTS daily_tokens (
     day         TEXT PRIMARY KEY,
     tokens      INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS artifacts (
+    ref         TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace   TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_ns ON memory(namespace);
 """
 
 
@@ -39,60 +54,137 @@ class SqliteRepo(Repository):
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        # 并行节点(F-B.1)会从多线程写同一连接;SQLite 连接非线程安全,
+        # 用一把锁串行化所有读写(简单稳妥;高并发再换连接池/WAL)。
+        self._lock = threading.Lock()
 
     # --- Checkpoint ---
     def save_checkpoint(self, state: CompanyState) -> None:
         from datetime import datetime, timezone
 
-        self._conn.execute(
-            "INSERT INTO checkpoints(task_id, state_json, updated_at) VALUES(?,?,?) "
-            "ON CONFLICT(task_id) DO UPDATE SET state_json=excluded.state_json, "
-            "updated_at=excluded.updated_at",
-            (
-                state.task_id,
-                state.model_dump_json(),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO checkpoints(task_id, state_json, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(task_id) DO UPDATE SET state_json=excluded.state_json, "
+                "updated_at=excluded.updated_at",
+                (
+                    state.task_id,
+                    state.model_dump_json(),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
 
     def load_checkpoint(self, task_id: str) -> CompanyState | None:
-        row = self._conn.execute(
-            "SELECT state_json FROM checkpoints WHERE task_id=?", (task_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state_json FROM checkpoints WHERE task_id=?", (task_id,)
+            ).fetchone()
         if row is None:
             return None
         return CompanyState.model_validate_json(row["state_json"])
 
     # --- Logs ---
     def append_log(self, entry: dict[str, Any]) -> None:
-        self._conn.execute(
-            "INSERT INTO logs(task_id, entry_json) VALUES(?,?)",
-            (entry.get("task_id", ""), json.dumps(entry, ensure_ascii=False)),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO logs(task_id, entry_json) VALUES(?,?)",
+                (entry.get("task_id", ""), json.dumps(entry, ensure_ascii=False)),
+            )
+            self._conn.commit()
 
     def logs_for(self, task_id: str) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT entry_json FROM logs WHERE task_id=? ORDER BY id", (task_id,)
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT entry_json FROM logs WHERE task_id=? ORDER BY id", (task_id,)
+            ).fetchall()
         return [json.loads(r["entry_json"]) for r in rows]
 
     # --- Daily tokens(成本熔断) ---
     def add_daily_tokens(self, day: str, tokens: int) -> int:
-        self._conn.execute(
-            "INSERT INTO daily_tokens(day, tokens) VALUES(?,?) "
-            "ON CONFLICT(day) DO UPDATE SET tokens = tokens + excluded.tokens",
-            (day, tokens),
-        )
-        self._conn.commit()
-        return self.get_daily_tokens(day)
-
-    def get_daily_tokens(self, day: str) -> int:
-        row = self._conn.execute(
-            "SELECT tokens FROM daily_tokens WHERE day=?", (day,)
-        ).fetchone()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO daily_tokens(day, tokens) VALUES(?,?) "
+                "ON CONFLICT(day) DO UPDATE SET tokens = tokens + excluded.tokens",
+                (day, tokens),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT tokens FROM daily_tokens WHERE day=?", (day,)
+            ).fetchone()
         return int(row["tokens"]) if row else 0
 
+    def get_daily_tokens(self, day: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tokens FROM daily_tokens WHERE day=?", (day,)
+            ).fetchone()
+        return int(row["tokens"]) if row else 0
+
+    # --- Artifact 落库 / 取回(F-C.3 demand-paging) ---
+    def save_artifact(self, task_id: str, ref: str, content: str) -> None:
+        from datetime import datetime, timezone
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO artifacts(ref, task_id, content, created_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(ref) DO UPDATE SET "
+                "content=excluded.content",
+                (ref, task_id, content,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def load_artifact(self, ref: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT content FROM artifacts WHERE ref=?", (ref,)
+            ).fetchone()
+        return row["content"] if row else None
+
+    # --- 长期记忆(命名空间隔离 + 关键词检索) ---
+    def save_memory(self, namespace: str, kind: str, text: str) -> None:
+        from datetime import datetime, timezone
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO memory(namespace, kind, text, created_at) "
+                "VALUES(?,?,?,?)",
+                (namespace, kind, text,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def search_memory(
+        self, namespace: str, query: str, top_k: int
+    ) -> list[dict[str, Any]]:
+        """关键词回退检索(F-C.5):取本命名空间全部条目,按 query 词命中数排序。
+
+        向量检索(sqlite-vec + Ark embedding)是可选增强,本期默认关键词回退;
+        命名空间严格隔离 runtime/edit(F-C.4),不跨库串味。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind, text, created_at FROM memory WHERE namespace=? "
+                "ORDER BY id DESC",
+                (namespace,),
+            ).fetchall()
+        terms = [t for t in query.lower().split() if t]
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for r in rows:
+            text_lower = r["text"].lower()
+            score = sum(text_lower.count(t) for t in terms) if terms else 0
+            scored.append((score, {
+                "kind": r["kind"], "text": r["text"],
+                "created_at": r["created_at"], "score": score,
+            }))
+        # 有命中按分排序;全 0(无 query/无命中)按时间倒序保留最近
+        hits = [item for s, item in scored if s > 0]
+        hits.sort(key=lambda d: d["score"], reverse=True)
+        if hits:
+            return hits[:top_k]
+        return [item for _, item in scored][:top_k]
+
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

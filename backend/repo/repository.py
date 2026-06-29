@@ -31,3 +31,19 @@ class Repository(ABC):
 
     @abstractmethod
     def get_daily_tokens(self, day: str) -> int: ...
+
+    # --- Artifact 落库 / 按指针取回(F-C.3 三级流水线 ①:大产出 demand-paging) ---
+    @abstractmethod
+    def save_artifact(self, task_id: str, ref: str, content: str) -> None: ...
+
+    @abstractmethod
+    def load_artifact(self, ref: str) -> str | None: ...
+
+    # --- 长期记忆读写 + 关键词检索(F-C.4 命名空间隔离 / F-C.5 检索注入) ---
+    @abstractmethod
+    def save_memory(self, namespace: str, kind: str, text: str) -> None: ...
+
+    @abstractmethod
+    def search_memory(
+        self, namespace: str, query: str, top_k: int
+    ) -> list[dict[str, Any]]: ...

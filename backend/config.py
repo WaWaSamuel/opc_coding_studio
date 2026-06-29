@@ -32,5 +32,16 @@ class Settings(BaseSettings):
     # Business loop / rework (F-D.1 业务回退上限,超限置 need_decision)
     max_loop_iterations: int = 3
 
+    # Node retry (F-D.2 节点重试:瞬时失败原地重试,与业务回退独立计数)
+    max_node_retry: int = 3
+
+    # Global circuit breakers (M07,借 Claude Code:每条自动恢复路径配上限)
+    max_compact_failures: int = 3   # 连续 Compact 失败 → 停压缩报 Host
+
+    # Context / Memory (F-C.3/C.5,M05)
+    compact_trigger_tokens: int = 8_000   # 任务记忆超此阈值触发全量压缩
+    result_preview_bytes: int = 2_048     # 大产出落库后 prompt 内保留预览字节数
+    retrieve_top_k: int = 3               # 检索注入 Top-K
+
 
 settings = Settings()

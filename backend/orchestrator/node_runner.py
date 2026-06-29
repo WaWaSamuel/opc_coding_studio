@@ -13,9 +13,12 @@ import time
 from datetime import datetime, timezone
 
 from backend.core.cost_guard import CostGuard
+from backend.core.memory import MemoryManager
 from backend.core.model_adapter.base import ModelAdapter
+from backend.core.retrieval import PrefixCache, Retriever
 from backend.core.roles.prompt_composer import PromptComposer
 from backend.core.roles.registry import RoleRegistry
+from backend.orchestrator.retry import RetryController
 from backend.orchestrator.self_repair import parse_with_self_repair
 from backend.repo.checkpoint_store import CheckpointStore
 from backend.repo.repository import Repository
@@ -30,12 +33,20 @@ class NodeRunner:
         repo: Repository,
         cost_guard: CostGuard,
         checkpoints: CheckpointStore,
+        retry: RetryController | None = None,
+        memory: MemoryManager | None = None,
+        prefix_cache: PrefixCache | None = None,
     ) -> None:
         self._adapter = adapter
         self._registry = registry
         self._repo = repo
         self._cost = cost_guard
         self._ckpt = checkpoints
+        self._retry = retry or RetryController()
+        # M3 harness:检索注入 + 前缀缓存统计(都可选,缺省不改变 M1/M2 行为)
+        self._memory = memory
+        self._retriever = Retriever(memory) if memory is not None else None
+        self._prefix_cache = prefix_cache
 
     def run(
         self,
@@ -48,10 +59,24 @@ class NodeRunner:
         state.current_role = role_id
         if upstream is None:
             upstream = state.artifacts[-1] if state.artifacts else None
-        messages = PromptComposer.compose(role, task_text, upstream)
 
-        # 成本熔断可能在记账时抛出 → 先记 role_start
-        self._log(state, "role_start", role_id, tokens=0, latency_ms=0)
+        # F-C.5 检索式记忆注入(置于 CACHE_BOUNDARY 前稳定区)
+        memory_block = ""
+        if self._retriever is not None:
+            retrieved = self._retriever.retrieve(role_id, task_text)
+            memory_block = retrieved.as_prompt_block()
+            if retrieved.items:
+                state.memory_refs = list(dict.fromkeys(
+                    state.memory_refs + [it["text"][:40] for it in retrieved.items]
+                ))
+
+        messages = PromptComposer.compose(
+            role, task_text, upstream, memory_block=memory_block
+        )
+
+        # F-C.6 稳定前缀缓存命中统计
+        if self._prefix_cache is not None:
+            self._prefix_cache.observe(messages)
 
         # 当前档位放可变容器,软限触发后降档(影响后续自修复调用)
         tier = {"value": role.model_tier}
@@ -66,21 +91,41 @@ class NodeRunner:
                 self._log(state, evt, role_id, tokens=res.tokens_total,
                           latency_ms=res.latency_ms)
 
-        first = self._adapter.invoke(messages, schema=role.output_schema, tier=tier["value"])
-        _charge(first, "tool_call")
+        def _invoke_once() -> Artifact:
+            """一次完整节点调用:模型 invoke + JSON 自修复。
 
-        def reinvoke(err_msg: str):
-            repair_messages = messages + [
-                {"role": "assistant", "content": first.content},
-                {"role": "user", "content": err_msg},
-            ]
-            res = self._adapter.invoke(
-                repair_messages, schema=role.output_schema, tier=tier["value"]
+            内层 self_repair 处理 JSON 不合法(回喂修正);若自修复仍耗尽
+            或模型 API 5xx/限流,会抛 SelfRepairExhausted/ModelCallError,
+            交外层 RetryController 做节点级原地重试(F-D.2,与业务回退独立)。
+            """
+            first = self._adapter.invoke(
+                messages, schema=role.output_schema, tier=tier["value"]
             )
-            _charge(res, "self_repair")
-            return res
+            _charge(first, "tool_call")
 
-        artifact, _results = parse_with_self_repair(first, reinvoke, state.retry_counters)
+            def reinvoke(err_msg: str):
+                repair_messages = messages + [
+                    {"role": "assistant", "content": first.content},
+                    {"role": "user", "content": err_msg},
+                ]
+                res = self._adapter.invoke(
+                    repair_messages, schema=role.output_schema, tier=tier["value"]
+                )
+                _charge(res, "self_repair")
+                return res
+
+            art, _results = parse_with_self_repair(
+                first, reinvoke, state.retry_counters
+            )
+            return art
+
+        def _on_retry(n: int, exc: Exception) -> None:
+            self._log(state, "node_retry", role_id, tokens=0, latency_ms=0,
+                      note=f"attempt={n} err={type(exc).__name__}: {exc}")
+
+        artifact = self._retry.run(
+            state, f"node:{role_id}", _invoke_once, on_retry=_on_retry
+        )
 
         # 回写 Artifact + 落 Checkpoint
         artifact.task_id = state.task_id
