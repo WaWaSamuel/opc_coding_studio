@@ -11,6 +11,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { CostPanel } from "./components/CostPanel";
 import { DecisionModal } from "./components/DecisionModal";
 import { EventTimeline } from "./components/EventTimeline";
+import { GraphView } from "./components/GraphView";
 import { TodoView } from "./components/TodoView";
 import { useEventStream } from "./hooks/useEventStream";
 
@@ -20,6 +21,7 @@ export default function App() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [cost, setCost] = useState<CostResp | null>(null);
   const [todoPlan, setTodoPlan] = useState<Array<Record<string, unknown>>>([]);
+  const [view, setView] = useState<"runtime" | "edit">("runtime");
   const { events, done, error } = useEventStream(taskId);
 
   // 当前是否在等待人在环决策(最近一条是 need_decision 且其后没有 decision)
@@ -55,7 +57,7 @@ export default function App() {
   const onSubmit = async (text: string) => {
     setCost(null);
     setTodoPlan([]);
-    const resp = await postCommand(text, SESSION_ID);
+    const resp = await postCommand(text, SESSION_ID, view);
     setTaskId(resp.task_id);
   };
 
@@ -69,6 +71,20 @@ export default function App() {
       <header className="topbar">
         <h1>一人公司 · OPC Studio</h1>
         <div className="status">
+          <span className="view-tabs">
+            <button
+              className={`chip ${view === "runtime" ? "active" : ""}`}
+              onClick={() => setView("runtime")}
+            >
+              Runtime 跑业务
+            </button>
+            <button
+              className={`chip ${view === "edit" ? "active" : ""}`}
+              onClick={() => setView("edit")}
+            >
+              Edit 改系统
+            </button>
+          </span>
           {taskId && (
             <span className={`badge ${done ? "ok" : "run"}`}>
               {error ? "异常" : done ? "已收口" : "运行中"} · {taskId}
@@ -77,16 +93,28 @@ export default function App() {
         </div>
       </header>
 
-      <div className="grid">
-        <div className="col-left">
-          <ChatPanel onSubmit={onSubmit} disabled={running} />
-          <TodoView events={events} todoPlan={todoPlan} />
-          <CostPanel cost={cost} />
+      {view === "edit" ? (
+        <div className="grid">
+          <div className="col-left">
+            <ChatPanel onSubmit={onSubmit} disabled={running} />
+            <GraphView />
+          </div>
+          <div className="col-right">
+            <EventTimeline events={events} />
+          </div>
         </div>
-        <div className="col-right">
-          <EventTimeline events={events} />
+      ) : (
+        <div className="grid">
+          <div className="col-left">
+            <ChatPanel onSubmit={onSubmit} disabled={running} />
+            <TodoView events={events} todoPlan={todoPlan} />
+            <CostPanel cost={cost} />
+          </div>
+          <div className="col-right">
+            <EventTimeline events={events} />
+          </div>
         </div>
-      </div>
+      )}
 
       {pendingDecision && <DecisionModal event={pendingDecision} onDecide={onDecide} />}
     </div>

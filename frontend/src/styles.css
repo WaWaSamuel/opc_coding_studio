@@ -158,3 +158,47 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 @media (max-width: 860px) {
   .grid { grid-template-columns: 1fr; }
 }
+
+/* View tabs */
+.status { display: flex; align-items: center; gap: 10px; }
+.view-tabs { display: flex; gap: 6px; }
+.chip.active { color: var(--text); border-color: var(--accent); background: var(--panel-2); }
+
+/* Edit GraphView */
+.graph .panel-title {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.graph-refs { display: flex; gap: 6px; }
+.graph-meta {
+  display: flex; gap: 12px; flex-wrap: wrap;
+  font-size: 11px; color: var(--muted); margin-bottom: 12px;
+}
+.graph-meta .on { color: var(--green); }
+.graph-meta .off { color: var(--muted); }
+.graph-flow { display: flex; flex-direction: column; align-items: stretch; }
+.graph-step { display: flex; flex-direction: column; align-items: center; }
+.graph-node {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.graph-node-label { font-size: 13px; font-weight: 600; }
+.graph-node-id { font-size: 11px; color: var(--muted); }
+.graph-node.kind-entry { border-left: 3px solid var(--accent); }
+.graph-node.kind-gate { border-left: 3px solid var(--amber); }
+.graph-node.kind-decision { border-left: 3px solid var(--accent); }
+.graph-node.kind-terminal { border-left: 3px solid var(--green); }
+.graph-node.kind-fallback { border-left: 3px solid var(--red); }
+.graph-node.changed {
+  border-color: var(--green);
+  box-shadow: 0 0 0 1px var(--green) inset;
+}
+.graph-arrow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0; color: var(--muted);
+}
+.graph-arrow-line { font-size: 14px; }
+.graph-arrow-label { font-size: 11px; }

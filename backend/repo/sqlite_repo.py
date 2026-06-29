@@ -43,6 +43,18 @@ CREATE TABLE IF NOT EXISTS memory (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_ns ON memory(namespace);
+CREATE TABLE IF NOT EXISTS testcases (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_key   TEXT UNIQUE,
+    source      TEXT NOT NULL,
+    intent      TEXT NOT NULL DEFAULT 'runtime',
+    goal        TEXT NOT NULL,
+    acceptance  TEXT NOT NULL DEFAULT '[]',
+    origin_task TEXT NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_testcases_active ON testcases(active);
 """
 
 
@@ -184,6 +196,59 @@ class SqliteRepo(Repository):
         if hits:
             return hits[:top_k]
         return [item for _, item in scored][:top_k]
+
+    # --- 测试集(M10:Badcase 入库 + 每周回归)---
+    def save_testcase(self, case: dict[str, Any]) -> int:
+        from datetime import datetime, timezone
+
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO testcases"
+                "(dedup_key, source, intent, goal, acceptance, origin_task, "
+                " active, created_at) VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(dedup_key) DO NOTHING",
+                (
+                    case.get("dedup_key"),
+                    case.get("source", "manual"),
+                    case.get("intent", "runtime"),
+                    case.get("goal", ""),
+                    json.dumps(case.get("acceptance", []), ensure_ascii=False),
+                    case.get("origin_task", ""),
+                    1 if case.get("active", True) else 0,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def list_testcases(self, only_active: bool = True) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT id, dedup_key, source, intent, goal, acceptance, "
+            "origin_task, active, created_at FROM testcases"
+        )
+        if only_active:
+            sql += " WHERE active=1"
+        sql += " ORDER BY id"
+        with self._lock:
+            rows = self._conn.execute(sql).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append({
+                "id": r["id"], "dedup_key": r["dedup_key"],
+                "source": r["source"], "intent": r["intent"],
+                "goal": r["goal"],
+                "acceptance": json.loads(r["acceptance"] or "[]"),
+                "origin_task": r["origin_task"],
+                "active": bool(r["active"]), "created_at": r["created_at"],
+            })
+        return out
+
+    def has_testcase(self, dedup_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM testcases WHERE dedup_key=?", (dedup_key,)
+            ).fetchone()
+        return row is not None
 
     def close(self) -> None:
         with self._lock:

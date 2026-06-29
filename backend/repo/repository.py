@@ -47,3 +47,13 @@ class Repository(ABC):
     def search_memory(
         self, namespace: str, query: str, top_k: int
     ) -> list[dict[str, Any]]: ...
+
+    # --- 测试集(M10 / F-E.2/E.3:Badcase 入库 + 每周回归)---
+    @abstractmethod
+    def save_testcase(self, case: dict[str, Any]) -> int: ...
+
+    @abstractmethod
+    def list_testcases(self, only_active: bool = True) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def has_testcase(self, dedup_key: str) -> bool: ...

@@ -62,6 +62,14 @@ ROLE_TOOL_WHITELIST: dict[str, set[str]] = {
     "loop-judge-agent": {"fs.read", "test.run"},
     "dev-lead-agent": {"fs.read"},
     "ceo-orchestrator-agent": set(),                         # 路由角色不碰 Tool
+    # M5 Edit 角色(改系统自身,纳管 git):
+    #   工程师产改动(feature 分支 diff)、评审提 PR;回归官只读 + 跑测;
+    #   部长只定位不直接动 git。push/PR 仍受 GitService 闸门 + Host 确认兜底。
+    "edit-lead-agent": {"fs.read", "git.diff"},
+    "edit-engineer-agent": {"fs.read", "fs.write", "git.branch", "git.diff",
+                            "git.commit"},
+    "edit-regression-agent": {"fs.read", "test.run", "git.diff"},
+    "edit-review-agent": {"fs.read", "git.diff", "git.pr", "git.revert"},
 }
 
 
@@ -166,3 +174,35 @@ class ToolInvoker:
                 "role": role, "tool": tool,
                 "decision": decision, "reason": reason,
             })
+
+
+def register_git_tools(registry: "ToolRegistry", git_service: Any) -> "ToolRegistry":
+    """把 git.* Tool 注册进 ToolRegistry(M09 / F-E.4)。
+
+    Tool handler 委托给 GitService;授权/危险检测/Host 确认仍由 ToolInvoker
+    四层流统一裁决。git.commit / git.revert 标记 dangerous=True(写/不可逆),
+    命中第③/④层需 Host 确认;git.branch / git.diff / git.pr 为非破坏性。
+    """
+    registry.register(Tool(
+        name="git.branch", scopes=["vcs"],
+        handler=lambda a: git_service.checkout_new_branch(a["branch"]),
+    ))
+    registry.register(Tool(
+        name="git.diff", scopes=["vcs"],
+        handler=lambda a: git_service.diff(a.get("base"), a.get("head")),
+    ))
+    registry.register(Tool(
+        name="git.commit", scopes=["vcs"], dangerous=True,
+        handler=lambda a: git_service.commit(a["message"], a.get("files")),
+    ))
+    registry.register(Tool(
+        name="git.revert", scopes=["vcs"], dangerous=True,
+        handler=lambda a: git_service.revert(a.get("commit", "HEAD")),
+    ))
+    registry.register(Tool(
+        name="git.pr", scopes=["vcs"],
+        handler=lambda a: git_service.open_pr(
+            a["branch"], a.get("summary", ""), a.get("badcase_ref", "")
+        ),
+    ))
+    return registry

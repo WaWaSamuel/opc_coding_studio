@@ -45,6 +45,12 @@ class DecisionIn(BaseModel):
     suggestion: str = ""
 
 
+class EditPrIn(BaseModel):
+    branch: str
+    summary: str = ""
+    badcase_ref: str = ""
+
+
 def create_app(service: OrchestratorService | None = None) -> FastAPI:
     svc = service or OrchestratorService()
     app = FastAPI(title="OPC Studio API", version="m4")
@@ -131,5 +137,26 @@ def create_app(service: OrchestratorService | None = None) -> FastAPI:
     @app.get("/cost")
     def cost(task_id: str) -> dict[str, Any]:
         return svc.cost(task_id)
+
+    # --- Edit 系统(M5 / F-A.8 可视化 + F-E.4 受控 PR)---
+    @app.get("/edit/graph")
+    def edit_graph(ref: str = "main") -> dict[str, Any]:
+        """Edit 工作流静态 DAG(main/feature);feature ref 标改动节点做 diff 高亮。"""
+        return svc.edit_graph(ref=ref)
+
+    @app.post("/edit/pr")
+    def edit_pr(body: EditPrIn) -> dict[str, Any]:
+        """提 PR(受控:默认 dry-run,不擅自推远端)→ {pr_url,...}。"""
+        return svc.submit_edit_pr(body.branch, body.summary, body.badcase_ref)
+
+    @app.post("/edit/testsuite/run")
+    def edit_testsuite_run() -> dict[str, Any]:
+        """手动跑一遍回归测试集(F-E.3)→ 通过率报告。"""
+        return svc.run_testsuite()
+
+    @app.post("/edit/testsuite/seed")
+    def edit_testsuite_seed() -> dict[str, int]:
+        """G7 测试集冷启动:载入种子用例。"""
+        return {"added": svc.load_seed_testcases()}
 
     return app

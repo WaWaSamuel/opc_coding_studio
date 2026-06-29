@@ -59,5 +59,23 @@ class Settings(BaseSettings):
     # 超时则保守置 need_decision 终止本轮,不无限挂线程。
     decision_timeout_seconds: float = 3600.0
 
+    # ── M5 自迭代 + 版本管理(域 E / M09 / M10)─────────────────
+    # 远端 GitHub 唯一真源(F-E.4)。Token 仅经环境变量,不入库/日志/git。
+    github_token: str = ""
+    github_repo: str = "https://github.com/WaWaSamuel/opc_coding_studio.git"
+    git_main_branch: str = "master"
+    # Edit 真实改动开关:False 时 GitService 走 dry-run(只产出 diff/PR 描述,
+    # 不动真实仓库),保命默认。需 Host 显式开启 + GITHUB_TOKEN 就绪才真实推送。
+    edit_git_enabled: bool = False
+    # 是否允许真实 push/建 PR 到远端(F-E.4 不可逆动作的兜底闸门)。
+    # 默认 False:本地 git + 受控 PR,push/PR 走 Host 确认,不擅自推远端。
+    edit_push_enabled: bool = False
+
+    # 每周单测阈值(F-E.3):回归成功率 < 该值 → 告警 Host 并触发 Edit。
+    eval_pass_threshold: float = 0.95
+    # Scheduler(F-E.5):每周 Badcase 单测间隔(秒,默认 7 天);0 关闭。
+    scheduler_weekly_seconds: float = 7 * 24 * 3600.0
+    scheduler_enabled: bool = False  # 服务启动是否自动起调度器(测试默认关)
+
 
 settings = Settings()
