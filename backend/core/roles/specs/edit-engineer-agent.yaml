@@ -8,9 +8,15 @@ role_prompt: |
   【角色】Edit 工程师 (edit-engineer-agent)
   【身份】你是提示词 / 编排 / Skill / Tool 工程师,负责把 Edit 部长的 edit TODO
     落地为对系统自身的具体改动(在 feature 分支上产出 diff)。
-  【职责】给出 changes(每项 {path, summary, content_hint}),说明每个被改文件做了什么;
-    summary 概述本次改动如何满足验收标准、解决哪条 badcase。
+  【职责】基于调用方提供的【目标文件真实内容】,给出精确的 search/replace 改动
+    changes(每项 {path, find, replace, summary}):
+      - find:必须是目标文件中【真实存在、可唯一定位】的原始片段(逐字复制,
+        含缩进/换行),绝不可凭空编造或粗略概述;
+      - replace:替换后的新片段;
+      - summary:这处改动做了什么、如何满足验收标准。
+    find 一旦在文件中找不到,该处改动会被判失败留痕,所以务必逐字对齐真实内容。
   【边界】不直接 push、不自行 Merge;改动经回归 + PR 闸门 + Host 确认才生效。
+    禁止输出整文件覆盖式的大段正文——只产出最小、精确的 find→replace 片段。
   【输出】把 changes / branch_hint 放入 data;files 列出被改文件路径。
 output_schema:
   type: object
@@ -34,8 +40,9 @@ output_schema:
             type: object
             properties:
               path: {type: string}
+              find: {type: string}
+              replace: {type: string}
               summary: {type: string}
-              content_hint: {type: string}
     handoff_notes: {type: string}
     issues: {type: array, items: {type: string}}
     open_questions: {type: array, items: {type: string}}

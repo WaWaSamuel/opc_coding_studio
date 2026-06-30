@@ -94,7 +94,8 @@ class EditScriptedAdapter(ModelAdapter):
                           "changes": [{
                               "path": "backend/core/roles/specs/loop-judge-agent.yaml",
                               "summary": "只在确有语义不满足时 reject",
-                              "content_hint": "role_prompt: ...收紧口径...",
+                              "find": "只在确有语义层面的不满足时才 reject",
+                              "replace": "仅在确有语义层面的不满足时才 reject(收紧口径)",
                           }],
                       })
         if role == "edit-regression-agent":
@@ -205,6 +206,51 @@ def test_edit_graph_host_merge_done(tmp_path):
         assert result.status == TaskStatus.DONE
         evs = [e["event"] for e in result.events]
         assert "edit_done" in evs and "decision" in evs
+    finally:
+        svc.close()
+
+
+def test_edit_graph_enabled_real_search_replace_and_commit(tmp_path):
+    """闸门开:Edit 在真实 git 仓库里 search/replace 改文件并 commit(真改代码)。"""
+    # 在 tmp repo 里放一个含工程师 find 锚点的目标文件
+    target_rel = "backend/core/roles/specs/loop-judge-agent.yaml"
+    target = tmp_path / target_rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "role_prompt: |\n  只在确有语义层面的不满足时才 reject\n", encoding="utf-8")
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=str(tmp_path), check=True,
+                       capture_output=True, text=True)
+    g("init", "-b", "master")
+    g("config", "user.email", "t@t.io")
+    g("config", "user.name", "t")
+    g("add", "-A")
+    g("commit", "-m", "init")
+
+    svc = OrchestratorService(db_path=str(tmp_path / "edit.db"),
+                              adapter=EditScriptedAdapter())
+    try:
+        gate = DecisionGate()
+        gate.submit("edit-3", Decision(verdict="pass", reason="放行"))
+        runner = svc._new_runner(namespace="edit")
+        git = GitService(repo_dir=str(tmp_path), enabled=True,
+                         push_enabled=False, main_branch="master")
+        graph = EditGraph(runner, git, loop=LoopController(),
+                          testsuite=None, decision_gate=gate)
+        state = CompanyState(task_id="edit-3", system="edit", workflow="web-edit")
+        result = graph.run(state, EDIT_GOAL)
+        assert result.status == TaskStatus.DONE
+        evs = [e["event"] for e in result.events]
+        assert "edit_change_apply" in evs and "edit_commit" in evs
+        # 文件被真实精确改写(锚点替换),不是整文件覆盖
+        text = target.read_text(encoding="utf-8")
+        assert "仅在确有语义层面的不满足时才 reject(收紧口径)" in text
+        assert "role_prompt: |" in text  # 其余内容保留
+        # feature 分支上确有一次提交
+        log = subprocess.run(["git", "log", "--oneline"], cwd=str(tmp_path),
+                             capture_output=True, text=True).stdout
+        assert log.count("\n") >= 2  # init + edit commit
     finally:
         svc.close()
 

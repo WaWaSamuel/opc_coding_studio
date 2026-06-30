@@ -25,6 +25,7 @@ from backend.orchestrator.edges import Decision, decide_from_verdict
 from backend.orchestrator.loop import LoopController
 from backend.orchestrator.node_runner import NodeRunner
 from backend.schema import Artifact, CompanyState, TaskStatus
+from backend.services.edit_workspace import EditWorkspace
 
 EventSink = Callable[[dict[str, Any]], None]
 
@@ -32,7 +33,7 @@ _LOOP_KEY = "edit-quality"
 
 # Edit 图级里程碑事件(落库审计真源 + 推流)。
 _PERSIST_GRAPH_EVENTS = frozenset({
-    "edit_start", "edit_locate", "edit_change", "edit_regression",
+    "edit_start", "edit_locate", "edit_change", "edit_commit", "edit_regression",
     "edit_review", "edit_rework", "need_decision", "decision",
     "edit_revert", "edit_done", "restart_required", "done", "error",
 })
@@ -108,6 +109,9 @@ class EditGraph:
     ) -> None:
         self._runner = runner
         self._git = git_service
+        # 仓库接地层:列真实可改文件 + 读目标真实内容 + search/replace 精确改写。
+        # repo_root 与 GitService 同根,保证定位/落盘/diff 三者口径一致。
+        self._workspace = EditWorkspace(getattr(git_service, "_dir", None))
         self._loop = loop or LoopController()
         self._testsuite = testsuite
         self._sink = event_sink
@@ -153,10 +157,16 @@ class EditGraph:
         self._emit("edit_start", task_id=state.task_id, goal=goal)
 
         # ── 1. Edit 部长定位 + TODO(F-E.1 定位)──────────────────
+        # 接地:把仓库里真实存在的可改文件清单喂给部长,逼其基于事实定位,
+        # 不再脑补不存在的文件名(此前"变粉"失败的根因之一)。
+        repo_files = self._workspace.list_repo_files()
+        files_blob = "\n".join(repo_files) if repo_files else "(空)"
         lead = self._runner.run(
             state, "edit-lead-agent",
             f"宿主诉求(改系统):{goal}\n请定位改动目标(提示词/编排/Skill/Tool),"
-            "拆解为 edit TODO Plan,并给出可被 diff/回归核对的 acceptance。",
+            "拆解为 edit TODO Plan,并给出可被 diff/回归核对的 acceptance。\n\n"
+            "【仓库真实可改文件清单(targets 必须取自其中,禁止虚构路径)】\n"
+            f"{files_blob}",
         )
         targets: list[str] = lead.data.get("targets", []) or []
         todo_plan: list[dict[str, Any]] = lead.data.get("todo_plan", []) or []
@@ -169,15 +179,26 @@ class EditGraph:
         branch = self._git.branches.feature_name(goal)
         eng: Artifact | None = None
         feedback: Artifact | None = None
+        sr_result: Any = None
         while True:
-            eng = self._engineer_step(state, goal, todo_plan, feedback)
+            eng = self._engineer_step(state, goal, targets, todo_plan, feedback)
             # feature 分支落改动(dry-run 默认不触碰真实仓库)
             self._git.checkout_new_branch(branch)
             changes = eng.data.get("changes", []) or []
-            files = {c["path"]: c.get("content_hint", "") for c in changes
-                     if c.get("path")}
-            if files:
-                self._git.apply_changes(files)
+            # 落盘:闸门开(git.enabled)→ 走 search/replace 精确改写真实文件;
+            # dry-run → 只把计划记进 GitService.plan,零风险。绝不再把"改动说明"
+            # 当文件正文整段覆盖(此前改坏 styles.css 的根因)。
+            if self._git.enabled and changes:
+                sr_result = self._workspace.apply_search_replace(changes)
+                self._emit("edit_change_apply", applied=sr_result.applied,
+                           failed=sr_result.failed, skipped=sr_result.skipped)
+                # 以真实改写到的文件为准(供 PR / 重启范围判定),不信模型自报。
+                if sr_result.changed_files:
+                    eng.artifact.files = list(sr_result.changed_files)
+            else:
+                planned = {c["path"]: "" for c in changes if c.get("path")}
+                if planned:
+                    self._git.apply_changes(planned)
 
             verdict, rate, failed, judge = self._regression(
                 state, goal, eng, acceptance
@@ -200,6 +221,17 @@ class EditGraph:
             feedback = judge
             self._emit("edit_rework", loop_key=_LOOP_KEY, iteration=n)
 
+        # ── 4.5 回归通过 → 在 feature 分支提交改动(闸门开才真实 commit)──
+        # 没有 commit 就无法 push/merge;dry-run 时 GitService.commit 只记计划。
+        if self._git.enabled and sr_result is not None and sr_result.changed_files:
+            from backend.services.git_service import PRComposer
+            commit_msg = PRComposer.commit_message(
+                eng.artifact.summary or goal, todo_ref=todo_plan[0]["id"]
+                if todo_plan else "")
+            commit = self._git.commit(commit_msg, files=sr_result.changed_files)
+            self._emit("edit_commit", branch=branch, sha=commit.output,
+                       files=sr_result.changed_files)
+
         # ── 5. 变更评审 → 提 PR(F-E.1 变更评审)──────────────────
         pr = self._review_step(state, goal, eng, branch)
         self._emit("edit_review", branch=branch, pr_url=pr.pr_url,
@@ -210,12 +242,21 @@ class EditGraph:
 
     # ── 内部步骤 ───────────────────────────────────────────────
     def _engineer_step(
-        self, state: CompanyState, goal: str,
+        self, state: CompanyState, goal: str, targets: list[str],
         todo_plan: list[dict[str, Any]], feedback: Artifact | None,
     ) -> Artifact:
+        # 接地:读目标文件的真实内容喂给工程师,让其基于事实产 search/replace,
+        # find 必须是文件里真实存在的片段,replace 为新片段(锚点不命中即失败留痕)。
+        contents = self._workspace.read_targets(targets)
+        blocks = []
+        for path, text in contents.items():
+            blocks.append(f"=== {path} ===\n{text}")
+        files_blob = "\n\n".join(blocks) if blocks else "(未读到目标文件内容)"
         task = (f"改系统目标:{goal}\nEdit TODO:{todo_plan}\n"
-                "请在 feature 分支上产出对系统自身的改动(changes:每项 path/summary/"
-                "content_hint),不直接 push/Merge。")
+                "请基于下方目标文件的【真实内容】产出精确改动 changes,每项为 "
+                "{path, find, replace, summary}:find 必须是文件中真实存在、"
+                "可唯一定位的原始片段,replace 为替换后的新片段;不直接 push/Merge。\n\n"
+                f"【目标文件真实内容】\n{files_blob}")
         if feedback is not None:
             task += ("\n\n【上一轮回归未过,请针对性修复】\n"
                      f"未过项:{feedback.data.get('failed_checks', feedback.issues)}\n"
