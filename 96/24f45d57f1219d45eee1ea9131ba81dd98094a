@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "9624f45d57f1219d45eee1ea9131ba81dd98094a",
+  "prompts": {},
+  "humans": {
+    "h_68ec15c9cde5a8": {
+      "author": "shenhuaiye.0731 <shenhuaiye.0731@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
