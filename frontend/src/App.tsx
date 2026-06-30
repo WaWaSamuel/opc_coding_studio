@@ -15,10 +15,26 @@ import { ChatPanel } from "./components/ChatPanel";
 import { CostPanel } from "./components/CostPanel";
 import { EventTimeline } from "./components/EventTimeline";
 import { GraphView } from "./components/GraphView";
+import { HistoryPanel } from "./components/HistoryPanel";
 import { TodoView } from "./components/TodoView";
 import { useEventStream } from "./hooks/useEventStream";
 
-const SESSION_ID = `web-${Math.random().toString(36).slice(2, 10)}`;
+// F-A.12 持久 SESSION_ID:同一浏览器跨刷新沿用同一会话,使后续消息能续跑到
+// 同 session 的活跃任务,而非每次刷新都另起会话丢失上下文。
+function persistentSessionId(): string {
+  const KEY = "opc.session_id";
+  try {
+    const saved = localStorage.getItem(KEY);
+    if (saved) return saved;
+    const fresh = `web-${Math.random().toString(36).slice(2, 10)}`;
+    localStorage.setItem(KEY, fresh);
+    return fresh;
+  } catch {
+    return `web-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+const SESSION_ID = persistentSessionId();
 
 // F-A.11 从终态事件流里凝练一句对话式回执(结论 + 产物摘要 + 耗时/tokens)。
 function buildReceipt(events: OpcEvent[]): { text: string; tone: "done" | "error" } {
@@ -52,6 +68,7 @@ export default function App() {
   const [todoPlan, setTodoPlan] = useState<Array<Record<string, unknown>>>([]);
   const [view, setView] = useState<"runtime" | "edit">("runtime");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [historyRefresh, setHistoryRefresh] = useState(0);
   const { events, done, error } = useEventStream(taskId);
   const receiptDone = useRef<string | null>(null);
 
@@ -81,12 +98,18 @@ export default function App() {
         ...prev,
         { role: "assistant", text, ts: Date.now(), tone },
       ]);
+      // 任务收口 → 刷新历史会话列表(新任务进列表 / 状态更新)。
+      setHistoryRefresh((n) => n + 1);
     }
   }, [taskId, done, events]);
 
-  // dev_plan 事件到达即异步拉一次快照,让 TODO 早点出现
+  // dev_plan(Runtime)/ edit_locate(Edit)事件到达即异步拉一次快照,让 TODO 早点出现
   useEffect(() => {
-    if (taskId && events.some((e) => e.event === "dev_plan") && todoPlan.length === 0) {
+    if (
+      taskId &&
+      events.some((e) => e.event === "dev_plan" || e.event === "edit_locate") &&
+      todoPlan.length === 0
+    ) {
       getTask(taskId)
         .then((s) => setTodoPlan((s.todo_plan as Array<Record<string, unknown>>) || []))
         .catch(() => undefined);
@@ -132,6 +155,17 @@ export default function App() {
     await postDecision(taskId, verdict);
   };
 
+  // F-A.12 选中历史会话 → 回放该任务(SSE 端点会补发已落库事件,完成态即全程回放)。
+  // 切换前清空当前任务态,receiptDone 复位避免误判已生成回执。
+  const onPickHistory = (picked: string) => {
+    if (picked === taskId) return;
+    receiptDone.current = null;
+    setCost(null);
+    setTodoPlan([]);
+    setMessages([]);
+    setTaskId(picked);
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -169,9 +203,16 @@ export default function App() {
               pendingDecision={pendingDecision}
               onDecide={onDecide}
             />
+            <TodoView events={events} todoPlan={todoPlan} />
             <GraphView />
           </div>
           <div className="col-right">
+            <HistoryPanel
+              system="edit"
+              activeTaskId={taskId}
+              onPick={onPickHistory}
+              refreshKey={historyRefresh}
+            />
             <EventTimeline events={events} />
           </div>
         </div>
@@ -189,6 +230,12 @@ export default function App() {
             <CostPanel cost={cost} />
           </div>
           <div className="col-right">
+            <HistoryPanel
+              system="runtime"
+              activeTaskId={taskId}
+              onPick={onPickHistory}
+              refreshKey={historyRefresh}
+            />
             <EventTimeline events={events} />
           </div>
         </div>

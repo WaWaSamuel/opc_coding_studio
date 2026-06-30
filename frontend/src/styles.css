@@ -131,6 +131,26 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 }
 .todo-done .todo-status { color: var(--green); border-color: var(--green); }
 
+/* History(F-A.12 历史会话) */
+.history-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+.history-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 6px; border-bottom: 1px solid var(--border);
+  font-size: 13px; cursor: pointer; border-radius: 6px;
+}
+.history-item:hover { background: rgba(255, 255, 255, 0.04); }
+.history-item.active { background: rgba(255, 255, 255, 0.07); }
+.history-status {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); flex-shrink: 0;
+}
+.history-status.done { color: var(--green); border-color: var(--green); }
+.history-status.need_decision { color: var(--accent); border-color: var(--accent); }
+.history-title {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.history-id { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+
 /* Cost */
 .cost-total { display: flex; gap: 24px; margin-bottom: 12px; }
 .cost-metric { display: flex; flex-direction: column; }

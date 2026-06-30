@@ -18,6 +18,9 @@ class Repository(ABC):
     @abstractmethod
     def load_checkpoint(self, task_id: str) -> CompanyState | None: ...
 
+    @abstractmethod
+    def list_checkpoints(self, limit: int = 100) -> list[dict[str, Any]]: ...
+
     # --- 流转日志 / 成本记账(F-A.6) ---
     @abstractmethod
     def append_log(self, entry: dict[str, Any]) -> None: ...

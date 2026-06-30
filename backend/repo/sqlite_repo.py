@@ -96,6 +96,43 @@ class SqliteRepo(Repository):
             return None
         return CompanyState.model_validate_json(row["state_json"])
 
+    def list_checkpoints(self, limit: int = 100) -> list[dict[str, Any]]:
+        """历史任务列表(F-A.12):最近更新优先,提取轻量摘要供前端历史面板。
+
+        不反序列化整份 state(只取可视化所需字段),避免大 state 拖慢列表。
+        title 取首条 host 消息 / payload.intent 兜底,供历史列表一眼识别。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT task_id, state_json, updated_at FROM checkpoints "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                st = json.loads(r["state_json"])
+            except (ValueError, TypeError):
+                st = {}
+            payload = st.get("payload") or {}
+            messages = payload.get("messages") or []
+            title = str(payload.get("text") or "").strip()
+            if not title:
+                for m in messages:
+                    if (m or {}).get("role") == "host" and (m or {}).get("text"):
+                        title = str(m["text"]).strip()
+                        break
+            if not title:
+                title = str(payload.get("intent") or st.get("workflow") or "").strip()
+            out.append({
+                "task_id": r["task_id"],
+                "system": st.get("system", "runtime"),
+                "status": st.get("status", "running"),
+                "title": title[:80],
+                "updated_at": r["updated_at"],
+            })
+        return out
+
     # --- Logs ---
     def append_log(self, entry: dict[str, Any]) -> None:
         with self._lock:

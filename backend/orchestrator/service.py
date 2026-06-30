@@ -25,7 +25,7 @@ from backend.core.memory import MemoryManager
 from backend.core.model_adapter.factory import build_adapter
 from backend.core.retrieval import PrefixCache
 from backend.core.roles.registry import RoleRegistry
-from backend.gateway.host_command import HostCommand
+from backend.gateway.host_command import HostCommand, classify_decision
 from backend.gateway.session_router import HostAuthorizer, SessionRouter
 from backend.orchestrator.decision_gate import Decision, DecisionGate
 from backend.orchestrator.graph_edit import EditGraph
@@ -91,16 +91,59 @@ class OrchestratorService:
             memory=memory, prefix_cache=PrefixCache(), event_bus=self._bus,
         )
 
+    def _continue_active_task(self, cmd: HostCommand) -> str | None:
+        """F-A.9 真多轮续跑:同 session 仍有未终态任务时,把本条消息当作"续聊/
+        补充意见"路由进该任务的 DecisionGate,返回其 task_id;否则返回 None(新建)。
+
+        判定:
+          - session 无活跃任务 / 任务已 done|failed → None(由 submit 新建)。
+          - 否则把 cmd.text 经 classify_decision 归一为 pass|reject|abort;
+            无法判定时按"补充意见(reject + suggestion)"续跑,让当前任务在下个
+            决策点据此返工,而非另开 task 丢失上下文。
+        DecisionGate.submit 对未进入 wait 的任务会预存决策并置位 Event,故运行中
+        与待决策两种语义都被覆盖。落一条 decision 事件供界面/回放追溯。
+        """
+        tid = self._sessions.task_for(cmd.session_id)
+        if tid is None:
+            return None
+        status = self.task_status(tid)
+        if status is None or status in (TaskStatus.DONE.value, TaskStatus.FAILED.value):
+            return None
+
+        text = (cmd.text or "").strip()
+        verdict = classify_decision(text)
+        if verdict is None:
+            # 无明确决策措辞:当作补充意见,驱动当前任务据此返工。
+            decision = Decision(verdict="reject", reason=text, suggestion=text)
+        else:
+            decision = Decision(verdict=verdict, reason=text,
+                                suggestion="" if verdict != "reject" else text)
+        self._gate.submit(tid, decision)
+        self._bus.emit(
+            tid, "decision", role="host",
+            payload={"verdict": decision.verdict, "reason": decision.reason,
+                     "suggestion": decision.suggestion, "source": "multi_turn"},
+            persist=True,
+        )
+        return tid
+
     def submit(self, cmd: HostCommand) -> str:
         """投递指令:开任务 → 后台线程跑编排图 → 立即返回 task_id。
 
         intent=edit → EditGraph(改系统,edit 记忆隔离);否则 RuntimeGraph(跑业务)。
+
+        F-A.9 真多轮续跑:同一 session 已有未终态(running/need_decision)的活跃
+        任务时,这条消息当作"续聊/补充意见"路由进该任务的 DecisionGate,而非另开
+        task——待决策时立即唤醒,运行中则预存(下个决策点消费)。仅当无活跃任务或
+        上一任务已终态(done/failed)才新建。
         """
         if not cmd.host_verified:
             raise PermissionError("非 Host 来源,拒绝投递(F-A.1)")
 
-        # 同一会话已有活跃任务且在等决策时,这条消息当作澄清不另开任务由调用方处理;
-        # 这里默认每次 submit 开新任务(多轮对话的语义编排留 G9)。
+        active = self._continue_active_task(cmd)
+        if active is not None:
+            return active
+
         is_edit = cmd.intent == "edit"
         prefix = "edit" if is_edit else "task"
         task_id = self._sessions.new_task_id(cmd.session_id, prefix=prefix)
@@ -109,6 +152,7 @@ class OrchestratorService:
                              workflow=f"{cmd.channel}-{cmd.intent}")
         state.payload = {"channel": cmd.channel, "session_id": cmd.session_id,
                          "reply_to": cmd.reply_to, "intent": cmd.intent,
+                         "text": cmd.text,
                          "attachments": cmd.attachments, "messages": cmd.messages}
         self._ckpt.save(state)
 
@@ -126,11 +170,13 @@ class OrchestratorService:
             try:
                 if is_edit:
                     from backend.services.restarter import ServiceRestarter
+                    from backend.services.isolated_verifier import IsolatedVerifier
                     graph = EditGraph(
                         self._new_runner(namespace="edit"), self._git,
                         loop=LoopController(), testsuite=self._testsuite,
                         event_bus=self._bus, decision_gate=self._gate,
                         restarter=ServiceRestarter(git_service=self._git),
+                        isolated_verifier=IsolatedVerifier(self._git),
                     )
                 else:
                     graph = RuntimeGraph(
@@ -206,6 +252,17 @@ class OrchestratorService:
     def history(self, task_id: str) -> list[dict[str, Any]]:
         """回放:返回该任务已落库的全部流转事件(F-A.4 按 task_id 回放)。"""
         return self._repo.logs_for(task_id)
+
+    def list_tasks(self, limit: int = 100, system: str | None = None
+                   ) -> list[dict[str, Any]]:
+        """历史任务列表(F-A.12):供 GET /tasks 历史会话面板。
+
+        最近更新优先;可按 system(runtime|edit)过滤,默认全量。
+        """
+        items = self._repo.list_checkpoints(limit=limit)
+        if system in ("runtime", "edit"):
+            items = [it for it in items if it.get("system") == system]
+        return items
 
     def is_done(self, task_id: str) -> bool:
         status = self.task_status(task_id)

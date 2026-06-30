@@ -7,11 +7,15 @@ interface TodoItem {
   status?: string;
 }
 
-// 从事件流里取最近一次 dev_plan / 任务快照里的 TODO。这里用事件推导,
-// 真源仍是后端 state.todo_plan(可经 GET /task 拉取)。
+// 从事件流里取最近一次 dev_plan(Runtime)/ edit_locate(Edit)/ 任务快照里的 TODO。
+// 这里用事件推导,真源仍是后端 state.todo_plan(可经 GET /task 拉取)。
 export function TodoView({ events, todoPlan }: { events: OpcEvent[]; todoPlan: TodoItem[] }) {
-  const planEvent = [...events].reverse().find((e) => e.event === "dev_plan");
-  const count = todoPlan.length || Number(planEvent?.payload?.todo_items ?? 0);
+  const planEvent = [...events]
+    .reverse()
+    .find((e) => e.event === "dev_plan" || e.event === "edit_locate");
+  const count =
+    todoPlan.length ||
+    Number(planEvent?.payload?.todo_items ?? planEvent?.payload?.todo_count ?? 0);
 
   return (
     <div className="panel todo">

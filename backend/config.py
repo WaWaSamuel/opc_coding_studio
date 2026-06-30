@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     # 是否允许自动重启前后端使改动生效。默认 False:只发 restart_required 信号,
     # 由 Host 手动重启(自重启脱离当前请求进程,health 失败回滚,属高危,保命默认关)。
     edit_auto_restart_enabled: bool = False
+    # 隔离实例验证(F-E.8):Edit 改动经回归通过、提 PR 前,是否额外起一个隔离的
+    # 临时全栈实例(git worktree + 独立端口/库)真实拉起并探活,证明"改完真能跑"。
+    # 默认 False:不起隔离实例(回归套件 + Host 确认即可),保命且省资源;
+    # 开 → 在临时 worktree 上装改动 + 起独立 uvicorn 探 /health,失败即判 reject。
+    edit_isolated_verify_enabled: bool = False
+    # 隔离实例验证用的独立后端端口(与主实例 api_port 隔离,避免抢占)。
+    edit_isolated_verify_port: int = 8011
 
     # 每周单测阈值(F-E.3):回归成功率 < 该值 → 告警 Host 并触发 Edit。
     eval_pass_threshold: float = 0.95

@@ -164,6 +164,14 @@ def create_app(service: OrchestratorService | None = None) -> FastAPI:
     def task_events(task_id: str) -> dict[str, Any]:
         return {"task_id": task_id, "events": svc.history(task_id)}
 
+    @app.get("/tasks")
+    def tasks(limit: int = 100, system: Optional[str] = None) -> dict[str, Any]:
+        """历史任务列表(F-A.12):最近更新优先,供前端历史会话面板拉取。
+
+        system ∈ {runtime, edit} 可选过滤;不传返回全量。
+        """
+        return {"tasks": svc.list_tasks(limit=limit, system=system)}
+
     @app.get("/cost")
     def cost(task_id: str) -> dict[str, Any]:
         return svc.cost(task_id)

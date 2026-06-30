@@ -41,6 +41,8 @@ class SearchReplaceResult:
     applied: dict[str, int] = field(default_factory=dict)   # path -> 替换处数
     failed: list[dict[str, str]] = field(default_factory=list)  # 锚点未命中/读失败
     skipped: dict[str, str] = field(default_factory=dict)   # path -> 拒写原因
+    # F-E.9 留痕透明:经"空白归一兜底"才命中的改写(find 与原文缩进/空白不一致)。
+    fuzzy: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def changed_files(self) -> list[str]:
@@ -51,6 +53,7 @@ class SearchReplaceResult:
             "applied": dict(self.applied),
             "failed": list(self.failed),
             "skipped": dict(self.skipped),
+            "fuzzy": list(self.fuzzy),
             "changed_files": self.changed_files,
         }
 
@@ -154,12 +157,23 @@ class EditWorkspace:
             if current is None:
                 res.failed.append({"path": path, "reason": "目标文件不存在,无法定位 find 锚点"})
                 continue
-            if find not in current:
-                res.failed.append({"path": path, "reason": "find 锚点未在文件中命中"})
+            if find in current:
+                count = current.count(find)
+                pending[path] = current.replace(find, replace)
+                res.applied[path] = res.applied.get(path, 0) + count
                 continue
-            count = current.count(find)
-            pending[path] = current.replace(find, replace)
-            res.applied[path] = res.applied.get(path, 0) + count
+            # F-E.9 空白归一兜底:精确锚点不命中时,按"忽略行首尾空白/缩进差异"
+            # 做一次容错重定位(模型常因缩进/制表符与原文不一致而锚点 miss)。
+            # 命中则按原文真实片段替换并留痕(fuzzy),仍找不到才 fail。
+            fuzzy_hit = self._fuzzy_replace(current, find, replace)
+            if fuzzy_hit is not None:
+                new_content, matched = fuzzy_hit
+                pending[path] = new_content
+                res.applied[path] = res.applied.get(path, 0) + 1
+                res.fuzzy.append({"path": path, "matched": matched[:200]})
+                continue
+            res.failed.append({"path": path, "reason": "find 锚点未在文件中命中"})
+            continue
 
         # 一次性回写命中的文件
         for path, content in pending.items():
@@ -176,3 +190,39 @@ class EditWorkspace:
         if ".." in Path(s).parts:
             return None
         return s
+
+    # ── 内部:空白归一兜底重定位(F-E.9)────────────────────────
+    @staticmethod
+    def _fuzzy_replace(
+        content: str, find: str, replace: str
+    ) -> tuple[str, str] | None:
+        """忽略行首尾空白/缩进差异,把 find 锚定到原文的真实连续行块。
+
+        逐行把 find 与 content 做"strip 后相等"的滑动比对;命中则用 replace 替换
+        原文中那段真实行块(保留原文换行)。返回 (新全文, 被替换的原文片段);
+        找不到返回 None。仅做一次首处替换,稳妥不贪婪。
+        """
+        raw = [ln.strip() for ln in find.splitlines()]
+        # 仅裁掉首尾空行,保留内部空行结构(避免错位)。
+        while raw and not raw[0]:
+            raw.pop(0)
+        while raw and not raw[-1]:
+            raw.pop()
+        find_lines = raw
+        if not find_lines:
+            return None
+        content_lines = content.splitlines(keepends=True)
+        stripped = [ln.strip() for ln in content_lines]
+        n = len(find_lines)
+        for i in range(len(content_lines) - n + 1):
+            if stripped[i:i + n] == find_lines:
+                matched = "".join(content_lines[i:i + n])
+                # 用 replace 顶替原文该行块;replace 末尾若无换行而原块有,则补回。
+                repl = replace
+                if matched.endswith("\n") and not repl.endswith("\n"):
+                    repl += "\n"
+                new_content = (
+                    "".join(content_lines[:i]) + repl + "".join(content_lines[i + n:])
+                )
+                return new_content, matched
+        return None

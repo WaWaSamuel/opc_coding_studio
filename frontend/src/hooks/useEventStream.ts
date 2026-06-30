@@ -46,9 +46,10 @@ export function useEventStream(taskId: string | null): EventStreamState {
       "handoff", "rework", "need_decision", "decision", "error", "done",
       "ceo_route", "dev_plan", "build", "rule_check", "loop_judge",
       "acceptance", "cost_soft_limit", "node_retry", "message",
-      // M6 Edit 链路里程碑 + 自重启信号
-      "edit_start", "edit_locate", "edit_change", "edit_regression",
-      "edit_review", "edit_rework", "edit_revert", "restart_required",
+      // M6 Edit 链路里程碑 + 自重启信号;M7 隔离实例验证
+      "edit_start", "edit_locate", "edit_change", "edit_change_apply",
+      "edit_commit", "edit_regression", "edit_verify", "edit_review",
+      "edit_rework", "edit_revert", "edit_done", "restart_required",
     ];
     TYPES.forEach((t) => es.addEventListener(t, handle as EventListener));
 

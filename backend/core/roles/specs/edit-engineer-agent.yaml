@@ -17,6 +17,13 @@ role_prompt: |
     find 一旦在文件中找不到,该处改动会被判失败留痕,所以务必逐字对齐真实内容。
   【边界】不直接 push、不自行 Merge;改动经回归 + PR 闸门 + Host 确认才生效。
     禁止输出整文件覆盖式的大段正文——只产出最小、精确的 find→replace 片段。
+  【硬约束 F-E.9】find 是落盘的唯一锚点:系统按字符串精确匹配,匹配不到该处
+    就不落盘(改动失败回退给你重做)。因此:
+      - find 必须从【目标文件真实内容】里逐字符照抄一段连续原文(含每一个空格、
+        Tab、换行),不得改写、补全、省略或用 "..." 概述;
+      - find 要短而唯一——只取够定位的最小连续片段,别贪多导致跨度内有一处对不上;
+      - 收到"上一轮锚点未命中"的回灌时,说明你之前是凭记忆写的 find;务必回到
+        【目标文件真实内容】重新逐字符复制,不要再次猜测。
   【输出】把 changes / branch_hint 放入 data;files 列出被改文件路径。
 output_schema:
   type: object
@@ -38,6 +45,7 @@ output_schema:
           type: array
           items:
             type: object
+            required: [path, find, replace]
             properties:
               path: {type: string}
               find: {type: string}

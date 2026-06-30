@@ -24,7 +24,7 @@ from backend.orchestrator.decision_gate import DecisionGate
 from backend.orchestrator.edges import Decision, decide_from_verdict
 from backend.orchestrator.loop import LoopController
 from backend.orchestrator.node_runner import NodeRunner
-from backend.schema import Artifact, CompanyState, TaskStatus
+from backend.schema import Artifact, ArtifactStatus, CompanyState, TaskStatus
 from backend.services.edit_workspace import EditWorkspace
 
 EventSink = Callable[[dict[str, Any]], None]
@@ -33,7 +33,8 @@ _LOOP_KEY = "edit-quality"
 
 # Edit 图级里程碑事件(落库审计真源 + 推流)。
 _PERSIST_GRAPH_EVENTS = frozenset({
-    "edit_start", "edit_locate", "edit_change", "edit_commit", "edit_regression",
+    "edit_start", "edit_locate", "edit_change", "edit_change_apply",
+    "edit_commit", "edit_regression", "edit_verify",
     "edit_review", "edit_rework", "need_decision", "decision",
     "edit_revert", "edit_done", "restart_required", "done", "error",
 })
@@ -106,6 +107,7 @@ class EditGraph:
         decision_gate: DecisionGate | None = None,
         threshold: float | None = None,
         restarter: Any = None,
+        isolated_verifier: Any = None,
     ) -> None:
         self._runner = runner
         self._git = git_service
@@ -118,6 +120,8 @@ class EditGraph:
         self._bus = event_bus
         self._gate = decision_gate
         self._restarter = restarter
+        # F-E.8 隔离实例验证器(可选注入):回归通过后、提 PR 前起隔离全栈实例探活。
+        self._verifier = isolated_verifier
         self._threshold = (
             settings.eval_pass_threshold if threshold is None else threshold
         )
@@ -191,10 +195,28 @@ class EditGraph:
             if self._git.enabled and changes:
                 sr_result = self._workspace.apply_search_replace(changes)
                 self._emit("edit_change_apply", applied=sr_result.applied,
-                           failed=sr_result.failed, skipped=sr_result.skipped)
+                           failed=sr_result.failed, skipped=sr_result.skipped,
+                           fuzzy=sr_result.fuzzy)
                 # 以真实改写到的文件为准(供 PR / 重启范围判定),不信模型自报。
                 if sr_result.changed_files:
                     eng.artifact.files = list(sr_result.changed_files)
+                # F-E.9 失败回灌:声明了 changes 却一处都没落盘(锚点全 miss / 全被
+                # 拒写),repo 实际未变 —— 此时若放行到回归会因"无改动"而 100% 通过,
+                # 假性合并空改动。强制回退到工程师重做,把失败锚点回灌(_engineer_step
+                # 每轮重读目标文件真实内容),逼其重新精确定位。
+                if not sr_result.applied:
+                    if not self._loop.can_rework(state, _LOOP_KEY):
+                        return self._need_decision(
+                            state,
+                            note=("search/replace 锚点连续未命中,改动无法落盘达上限;"
+                                  f"失败明细:{sr_result.failed or sr_result.skipped}。"),
+                            final=eng, branch=branch, acceptance=acceptance,
+                        )
+                    n = self._loop.register_reject(state, _LOOP_KEY)
+                    feedback = self._sr_failure_feedback(eng, sr_result)
+                    self._emit("edit_rework", loop_key=_LOOP_KEY, iteration=n,
+                               reason="search_replace_anchor_miss")
+                    continue
             else:
                 planned = {c["path"]: "" for c in changes if c.get("path")}
                 if planned:
@@ -207,7 +229,24 @@ class EditGraph:
                        threshold=self._threshold, failed_checks=failed,
                        iteration=self._loop.iterations(state, _LOOP_KEY))
             if decide_from_verdict(verdict) == Decision.PASS:
-                break
+                # 回归通过 → 先在 feature 分支提交(隔离验证要 worktree 检出此分支),
+                # 再起隔离实例真实探活(F-E.8)。验证失败按"劣化"回退工程师重做。
+                self._maybe_commit(eng, goal, branch, todo_plan, sr_result)
+                vr = self._verify_isolated(branch)
+                if vr.ok:
+                    break
+                if not self._loop.can_rework(state, _LOOP_KEY):
+                    return self._need_decision(
+                        state,
+                        note=("隔离实例验证连续失败达上限,改完无法真实拉起服务;"
+                              f"诊断:{vr.note}。"),
+                        final=eng, branch=branch, acceptance=acceptance,
+                    )
+                n = self._loop.register_reject(state, _LOOP_KEY)
+                feedback = self._verify_failure_feedback(eng, vr)
+                self._emit("edit_rework", loop_key=_LOOP_KEY, iteration=n,
+                           reason="isolated_verify_failed")
+                continue
 
             # 劣化 → 回退到工程师重做
             if not self._loop.can_rework(state, _LOOP_KEY):
@@ -220,17 +259,6 @@ class EditGraph:
             n = self._loop.register_reject(state, _LOOP_KEY)
             feedback = judge
             self._emit("edit_rework", loop_key=_LOOP_KEY, iteration=n)
-
-        # ── 4.5 回归通过 → 在 feature 分支提交改动(闸门开才真实 commit)──
-        # 没有 commit 就无法 push/merge;dry-run 时 GitService.commit 只记计划。
-        if self._git.enabled and sr_result is not None and sr_result.changed_files:
-            from backend.services.git_service import PRComposer
-            commit_msg = PRComposer.commit_message(
-                eng.artifact.summary or goal, todo_ref=todo_plan[0]["id"]
-                if todo_plan else "")
-            commit = self._git.commit(commit_msg, files=sr_result.changed_files)
-            self._emit("edit_commit", branch=branch, sha=commit.output,
-                       files=sr_result.changed_files)
 
         # ── 5. 变更评审 → 提 PR(F-E.1 变更评审)──────────────────
         pr = self._review_step(state, goal, eng, branch)
@@ -265,6 +293,68 @@ class EditGraph:
         self._emit("edit_change", status=art.status.value,
                    files=art.artifact.files)
         return art
+
+    def _sr_failure_feedback(self, eng: Artifact, sr_result: Any) -> Artifact:
+        """F-E.9:把 search/replace 落盘失败明细打包成回灌给工程师的 feedback。
+
+        复用 _engineer_step 读 feedback.data['failed_checks'/'suggestion'] 的约定,
+        让下一轮工程师明确"上轮哪些 find 锚点没命中/被拒写",据真实内容重新精确定位。
+        """
+        miss = [f"{f.get('path', '?')}: {f.get('reason', '')}"
+                for f in (sr_result.failed or [])]
+        skip = [f"{p}: {r}" for p, r in (sr_result.skipped or {}).items()]
+        fb = eng.model_copy(deep=True)
+        fb.status = ArtifactStatus.NEED_REWORK
+        fb.data = {
+            "failed_checks": miss + skip,
+            "suggestion": (
+                "上一轮 search/replace 锚点未命中,改动未落盘(repo 实际未变)。"
+                "请严格依据目标文件的【真实内容】重写 find 片段:必须逐字符照抄"
+                "(含缩进/空白)文件中真实存在、可唯一定位的连续片段,不要凭记忆改写。"
+            ),
+        }
+        return fb
+
+    def _maybe_commit(self, eng: Artifact, goal: str, branch: str,
+                      todo_plan: list[dict[str, Any]], sr_result: Any) -> None:
+        """回归通过 → 在 feature 分支提交改动(闸门开才真实 commit)。
+
+        没有 commit 就无法 push/merge,也无法被隔离 worktree 检出;dry-run 时
+        GitService.commit 只记计划。提到隔离验证之前,确保验证检出到的是带改动的分支。
+        """
+        if self._git.enabled and sr_result is not None and sr_result.changed_files:
+            from backend.services.git_service import PRComposer
+            commit_msg = PRComposer.commit_message(
+                eng.artifact.summary or goal,
+                todo_ref=todo_plan[0]["id"] if todo_plan else "")
+            commit = self._git.commit(commit_msg, files=sr_result.changed_files)
+            self._emit("edit_commit", branch=branch, sha=commit.output,
+                       files=sr_result.changed_files)
+
+    def _verify_isolated(self, branch: str) -> Any:
+        """F-E.8:回归通过后起隔离全栈实例真实探活(无 verifier / 闸门关 → skipped)。"""
+        from backend.services.isolated_verifier import VerifyResult
+
+        if self._verifier is None:
+            return VerifyResult(True, skipped=True, note="未配置隔离验证器,跳过")
+        vr = self._verifier.verify(branch)
+        self._emit("edit_verify", ok=vr.ok, skipped=vr.skipped,
+                   health=vr.health, note=vr.note)
+        return vr
+
+    def _verify_failure_feedback(self, eng: Artifact, vr: Any) -> Artifact:
+        """F-E.8:隔离实例起服务失败 → 把诊断打包回灌工程师,逼其修到能真实拉起。"""
+        fb = eng.model_copy(deep=True)
+        fb.status = ArtifactStatus.NEED_REWORK
+        fb.data = {
+            "failed_checks": [vr.note] + ([vr.logs] if getattr(vr, "logs", "") else []),
+            "suggestion": (
+                "改动通过了回归套件,但起一个隔离全栈实例探活 /health 失败"
+                "(改完真实跑不起来,可能是 import 报错/语法错/启动期异常)。"
+                "请据下方诊断/日志定位并修复,确保改动后后端能被正常拉起。"
+            ),
+        }
+        return fb
 
     def _regression(
         self, state: CompanyState, goal: str,

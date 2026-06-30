@@ -34,6 +34,15 @@ export interface TaskSnapshot {
   [k: string]: unknown;
 }
 
+// F-A.12 历史会话条目(GET /tasks 返回的轻量摘要)
+export interface TaskListItem {
+  task_id: string;
+  system: "runtime" | "edit";
+  status: string;
+  title: string;
+  updated_at?: string;
+}
+
 export type Verdict = "pass" | "reject" | "abort";
 
 // F-A.9/A.10:对话消息 + 多模态附件
@@ -138,6 +147,19 @@ export async function getTask(taskId: string): Promise<TaskSnapshot> {
   const r = await fetch(`${BASE}/task/${encodeURIComponent(taskId)}`);
   if (!r.ok) throw new Error(`task failed: ${r.status}`);
   return r.json();
+}
+
+// F-A.12 历史会话列表:最近更新优先;system 可选过滤(runtime|edit)。
+export async function getTasks(
+  system?: "runtime" | "edit",
+  limit = 100,
+): Promise<TaskListItem[]> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (system) q.set("system", system);
+  const r = await fetch(`${BASE}/tasks?${q.toString()}`);
+  if (!r.ok) throw new Error(`tasks failed: ${r.status}`);
+  const data = (await r.json()) as { tasks?: TaskListItem[] };
+  return data.tasks ?? [];
 }
 
 export function eventsUrl(taskId: string): string {
