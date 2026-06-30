@@ -114,10 +114,11 @@ def test_git_service_dry_run_default(tmp_path):
     assert git.can_push is False
     r = git.checkout_new_branch("feature/x")
     assert r.ok and "[dry-run]" in r.note
-    git.apply_changes({"a.py": "print(1)", "b.py": "print(2)"})
+    # 写路径受 F-E.7 白名单约束:用纳管目录内的路径(backend/**)。
+    git.apply_changes({"backend/a.py": "print(1)", "backend/b.py": "print(2)"})
     # dry-run diff 从 plan 推 planned change
     diff = git.diff("master", None)
-    assert "planned change" in diff and "a.py" in diff
+    assert "planned change" in diff and "backend/a.py" in diff
     pr = git.open_pr("feature/x", "改点东西", badcase_ref="badcase:1")
     assert pr.dry_run is True and pr.pushed is False
     assert "compare" in pr.pr_url
@@ -155,11 +156,11 @@ def test_git_service_enabled_real_repo(tmp_path):
     assert git.current_branch() == "master"
     git.checkout_new_branch("feature/real")
     assert git.current_branch() == "feature/real"
-    git.apply_changes({"new.py": "print('hi')\n"})
+    git.apply_changes({"backend/new.py": "print('hi')\n"})
     commit = git.commit("edit: add new.py")
     assert commit.ok and commit.output  # sha
     diff = git.diff("master", "feature/real")
-    assert "new.py" in diff
+    assert "backend/new.py" in diff
     rv = git.revert("HEAD")
     assert rv.ok
 

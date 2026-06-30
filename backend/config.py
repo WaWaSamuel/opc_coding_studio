@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # 是否允许真实 push/建 PR 到远端(F-E.4 不可逆动作的兜底闸门)。
     # 默认 False:本地 git + 受控 PR,push/PR 走 Host 确认,不擅自推远端。
     edit_push_enabled: bool = False
+    # 服务自重启(F-E.6):Edit 改了 backend/** 或 frontend/** 且经回归+Merge 后,
+    # 是否允许自动重启前后端使改动生效。默认 False:只发 restart_required 信号,
+    # 由 Host 手动重启(自重启脱离当前请求进程,health 失败回滚,属高危,保命默认关)。
+    edit_auto_restart_enabled: bool = False
 
     # 每周单测阈值(F-E.3):回归成功率 < 该值 → 告警 Host 并触发 Edit。
     eval_pass_threshold: float = 0.95

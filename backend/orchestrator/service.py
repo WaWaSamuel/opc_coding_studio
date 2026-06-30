@@ -108,23 +108,36 @@ class OrchestratorService:
                              system="edit" if is_edit else "runtime",
                              workflow=f"{cmd.channel}-{cmd.intent}")
         state.payload = {"channel": cmd.channel, "session_id": cmd.session_id,
-                         "reply_to": cmd.reply_to, "intent": cmd.intent}
+                         "reply_to": cmd.reply_to, "intent": cmd.intent,
+                         "attachments": cmd.attachments, "messages": cmd.messages}
         self._ckpt.save(state)
+
+        # F-A.10 多模态降级:当前模型档位走文本通道,图片附件以引用形式并入目标文本
+        # (而非静默丢弃),让角色知晓"宿主附了图,但本通道按文本处理"。多模态模型
+        # 接入后改为 content:[{type:text},{type:image_url}] 透传即可,入口契约不变。
+        goal = cmd.text
+        if cmd.attachments:
+            refs = ", ".join(
+                str(a.get("name") or a.get("url") or "image") for a in cmd.attachments
+            )
+            goal = f"{goal}\n\n[宿主附带 {len(cmd.attachments)} 张图片(图片已忽略,按文本处理):{refs}]"
 
         def _run() -> None:
             try:
                 if is_edit:
+                    from backend.services.restarter import ServiceRestarter
                     graph = EditGraph(
                         self._new_runner(namespace="edit"), self._git,
                         loop=LoopController(), testsuite=self._testsuite,
                         event_bus=self._bus, decision_gate=self._gate,
+                        restarter=ServiceRestarter(git_service=self._git),
                     )
                 else:
                     graph = RuntimeGraph(
                         self._new_runner(namespace="runtime"), loop=LoopController(),
                         event_bus=self._bus, decision_gate=self._gate,
                     )
-                graph.run(state, cmd.text)
+                graph.run(state, goal)
             except Exception as exc:  # noqa: BLE001 — 收口任何异常为 error 事件
                 self._bus.emit(task_id, "error", role="orchestrator",
                                payload={"error": f"{type(exc).__name__}: {exc}"},
@@ -199,24 +212,52 @@ class OrchestratorService:
         return status in (TaskStatus.DONE.value, TaskStatus.FAILED.value)
 
     # --- Edit 系统可视化 / 版本动作(M5 / F-A.8 / F-E.3/E.4/E.5)---
-    def edit_graph(self, ref: str = "main") -> dict[str, Any]:
-        """Edit 工作流静态 DAG(供 GET /edit/graph 可视化)。
+    def edit_graph(self, ref: str = "main", workflow: str = "edit") -> dict[str, Any]:
+        """工作流静态 DAG(供 GET /edit/graph 可视化,M6/F-A.8 扩为多工作流全景)。
 
-        feature ref 时,从 GitService 计划里推出本次涉及的改动文件,标到节点上
-        做 diff 高亮(F-A.8);main ref 返回干净 DAG。Token 永不出现在返回中。
+        workflow ∈ {edit, runtime}:edit 返回 Edit 自迭代链路,runtime 返回业务
+        交付链路;两者节点结构同构(node.role_id 供 RoleInspector 下钻)。
+        返回里附 workflows 清单(供前端切换全工作流),feature ref 标改动节点高亮。
+        Token 永不出现在返回中。
         """
         changed: list[str] = []
         if ref != self._git.main_branch:
-            # 工程师节点是改动落点;有计划写盘动作即标其为 changed。
             if any(a.get("action") == "apply_changes" for a in self._git.plan):
                 changed.append("edit-engineer-agent")
-        spec = EditGraph.dag_spec(ref=ref, changed_targets=changed)
+        if workflow == "runtime":
+            spec = RuntimeGraph.dag_spec(ref=ref, changed_targets=changed)
+        else:
+            workflow = "edit"
+            spec = EditGraph.dag_spec(ref=ref, changed_targets=changed)
+        spec["workflow"] = workflow
+        spec["workflows"] = [
+            {"id": "edit", "label": "Edit 改系统"},
+            {"id": "runtime", "label": "Runtime 跑业务"},
+        ]
         spec["git"] = {
             "enabled": self._git.enabled,
             "can_push": self._git.can_push,
             "main_branch": self._git.main_branch,
         }
         return spec
+
+    def role_detail(self, role_id: str) -> dict[str, Any] | None:
+        """角色完整元数据(供 GET /role/{id} / RoleInspector,M6/F-A.8)。"""
+        try:
+            return self._registry.detail(role_id)
+        except KeyError:
+            return None
+
+    def restart_service(self, scope: str = "both") -> dict[str, Any]:
+        """服务自重启(供 POST /edit/restart,M6/F-E.6)。
+
+        受 edit_auto_restart_enabled 闸门控制:关 → dry-run 回 restart_required;
+        开 → 脱离当前进程重启,health 失败回滚。git_service 注入做回滚兜底。
+        """
+        from backend.services.restarter import ServiceRestarter
+
+        restarter = ServiceRestarter(git_service=self._git)
+        return restarter.restart(scope).as_dict()  # type: ignore[arg-type]
 
     def submit_edit_pr(self, branch: str, summary: str,
                        badcase_ref: str = "") -> dict[str, Any]:

@@ -202,3 +202,166 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 }
 .graph-arrow-line { font-size: 14px; }
 .graph-arrow-label { font-size: 11px; }
+
+/* ReactFlow 工作流全景(F-A.8 / M6) */
+.rf-wrap {
+  position: relative;
+  height: 460px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.rf-node {
+  position: relative;
+  min-width: 190px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: var(--text);
+}
+.rf-node-label { font-size: 13px; font-weight: 600; }
+.rf-node-id { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.rf-entry { border-left-color: var(--accent); }
+.rf-role { border-left-color: var(--accent); }
+.rf-gate { border-left-color: var(--amber); }
+.rf-decision { border-left-color: #c089ff; }
+.rf-terminal { border-left-color: var(--green); }
+.rf-fallback { border-left-color: var(--red); }
+.rf-clickable { cursor: pointer; }
+.rf-clickable:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.rf-changed {
+  border-color: var(--green);
+  box-shadow: 0 0 0 1px var(--green) inset;
+}
+.rf-badge {
+  position: absolute; top: -8px; right: -8px;
+  font-size: 10px; font-weight: 700;
+  background: var(--green); color: #07130d;
+  border-radius: 999px; padding: 1px 7px;
+}
+
+/* RoleInspector 角色详情侧栏 */
+.role-inspector {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  width: 300px; max-width: 80%;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  display: flex; flex-direction: column;
+  z-index: 5;
+}
+.ri-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 14px;
+}
+.ri-close {
+  border: none; background: transparent; color: var(--muted);
+  font-size: 18px; padding: 0 6px; line-height: 1;
+}
+.ri-close:hover { color: var(--text); }
+.ri-body { padding: 12px 14px; overflow-y: auto; }
+.ri-row { display: flex; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+.ri-key { color: var(--muted); min-width: 72px; }
+.ri-val { color: var(--text); word-break: break-all; }
+.ri-block { margin: 12px 0; }
+.ri-block .ri-key { display: block; margin-bottom: 6px; }
+.ri-resp {
+  white-space: pre-wrap; word-break: break-word;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; margin: 0;
+  font-size: 12px; line-height: 1.5; max-height: 220px; overflow-y: auto;
+}
+.ri-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.ri-tag {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--accent); color: var(--text);
+}
+.ri-tag.ghost { border-color: var(--border); color: var(--muted); }
+.ri-muted { color: var(--muted); font-size: 12px; }
+
+/* 对话式 Chat(F-A.9 多轮 / F-A.10 图片 / F-A.11 回执 / F-A.7 内联决策) */
+.chat-thread {
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 40vh; overflow-y: auto;
+  margin-bottom: 10px; padding-right: 4px;
+}
+.msg { display: flex; }
+.msg.host { justify-content: flex-end; }
+.msg.assistant { justify-content: flex-start; }
+.msg-bubble {
+  max-width: 82%;
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.host .msg-bubble {
+  background: var(--accent); color: #fff; border-bottom-right-radius: 4px;
+}
+.msg.assistant .msg-bubble {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+.msg-bubble.done { border-color: var(--green); }
+.msg-bubble.error { border-color: var(--red); }
+.msg-meta { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-imgs img {
+  max-width: 120px; max-height: 90px; border-radius: 8px;
+  border: 1px solid var(--border); object-fit: cover;
+}
+
+.attach-preview {
+  display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0;
+}
+.attach-chip {
+  position: relative; width: 64px; height: 64px;
+  border-radius: 8px; border: 1px solid var(--border); overflow: hidden;
+}
+.attach-chip img { width: 100%; height: 100%; object-fit: cover; }
+.attach-chip .x {
+  position: absolute; top: 2px; right: 2px;
+  width: 18px; height: 18px; line-height: 16px; text-align: center;
+  border-radius: 50%; background: rgba(0,0,0,0.6); color: #fff;
+  font-size: 12px; cursor: pointer; border: none;
+}
+.chat-tools { display: flex; align-items: center; gap: 8px; }
+.icon-btn {
+  padding: 6px 10px; font-size: 12px;
+}
+
+/* 内联人在环决策气泡(F-A.7 通道①) */
+.inline-decision {
+  border: 1px solid var(--amber);
+  background: rgba(233, 162, 59, 0.08);
+  border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
+}
+.inline-decision .id-title { font-weight: 600; margin-bottom: 4px; }
+.inline-decision .id-note { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.inline-decision .id-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.inline-decision .id-hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+/* 流转留痕 hover 详情(F-A.4 EventDetailPopover) */
+.tl-item { position: relative; }
+.tl-content { flex: 1; }
+.ev-pop {
+  display: none;
+  position: absolute; left: 24px; top: 100%; z-index: 20;
+  width: 280px; margin-top: 4px;
+  background: var(--panel); border: 1px solid var(--accent);
+  border-radius: 10px; padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.tl-item:hover .ev-pop { display: block; }
+.ev-pop .pop-title { font-weight: 600; font-size: 12px; margin-bottom: 6px; }
+.ev-pop .pop-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 12px; padding: 2px 0; color: var(--muted);
+}
+.ev-pop .pop-row b { color: var(--text); font-weight: 600; }
+.ev-pop .pop-did { font-size: 12px; color: var(--text); margin-bottom: 6px; word-break: break-word; }

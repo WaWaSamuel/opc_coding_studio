@@ -34,16 +34,38 @@ _LOOP_KEY = "edit-quality"
 _PERSIST_GRAPH_EVENTS = frozenset({
     "edit_start", "edit_locate", "edit_change", "edit_regression",
     "edit_review", "edit_rework", "need_decision", "decision",
-    "edit_revert", "edit_done", "done", "error",
+    "edit_revert", "edit_done", "restart_required", "done", "error",
 })
 
+
+def _restart_scope(files: list[str]) -> str | None:
+    """据被改文件路径判断需重启的范围(F-E.6)。
+
+    backend/** → backend;frontend/** → frontend;两者皆有 → both;
+    都不涉及(纯角色 YAML/提示词改动,Runtime 热加载即可)→ None,无需重启。
+    """
+    touch_backend = any(f.startswith("backend/") for f in files)
+    touch_frontend = any(f.startswith("frontend/") for f in files)
+    if touch_backend and touch_frontend:
+        return "both"
+    if touch_backend:
+        return "backend"
+    if touch_frontend:
+        return "frontend"
+    return None
+
 # 静态工作流 DAG(F-A.8 可视化:节点=角色/闸门,边=流转语义)。
+# role 节点带 role_id,供前端 RoleInspector 下钻角色详情(model_tier/职责/可调 skill+tool)。
 _DAG_NODES = [
     {"id": "edit_start", "label": "Host 改系统", "kind": "entry"},
-    {"id": "edit-lead-agent", "label": "Edit 部长(定位+TODO)", "kind": "role"},
-    {"id": "edit-engineer-agent", "label": "工程师(feature 分支 diff)", "kind": "role"},
-    {"id": "edit-regression-agent", "label": "回归测试官(≥95%)", "kind": "gate"},
-    {"id": "edit-review-agent", "label": "变更评审(提 PR)", "kind": "role"},
+    {"id": "edit-lead-agent", "label": "Edit 部长(定位+TODO)",
+     "kind": "role", "role_id": "edit-lead-agent"},
+    {"id": "edit-engineer-agent", "label": "工程师(feature 分支 diff)",
+     "kind": "role", "role_id": "edit-engineer-agent"},
+    {"id": "edit-regression-agent", "label": "回归测试官(≥95%)",
+     "kind": "gate", "role_id": "edit-regression-agent"},
+    {"id": "edit-review-agent", "label": "变更评审(提 PR)",
+     "kind": "role", "role_id": "edit-review-agent"},
     {"id": "host_merge", "label": "Host 确认 Merge", "kind": "decision"},
     {"id": "main", "label": "main 生效", "kind": "terminal"},
     {"id": "revert", "label": "git revert 回滚", "kind": "fallback"},
@@ -82,6 +104,7 @@ class EditGraph:
         event_bus: EventBus | None = None,
         decision_gate: DecisionGate | None = None,
         threshold: float | None = None,
+        restarter: Any = None,
     ) -> None:
         self._runner = runner
         self._git = git_service
@@ -90,6 +113,7 @@ class EditGraph:
         self._sink = event_sink
         self._bus = event_bus
         self._gate = decision_gate
+        self._restarter = restarter
         self._threshold = (
             settings.eval_pass_threshold if threshold is None else threshold
         )
@@ -275,6 +299,10 @@ class EditGraph:
             self._runner.checkpoint(state)
             self._emit("edit_done", task_id=state.task_id, branch=branch,
                        pr_url=pr.pr_url)
+            # F-E.6:改动落到 backend/** 或 frontend/** 才需重启才生效。
+            # 默认只发 restart_required 信号(闸门关 → dry-run),由 Host 手动重启;
+            # 闸门开 → restart_service 脱离当前进程重启,health 失败回滚。
+            self._maybe_restart(eng)
             return EditResult(state, TaskStatus.DONE, eng, pr=pr,
                               note="Host 确认 Merge,main 生效", events=self._events)
 
@@ -294,6 +322,27 @@ class EditGraph:
         return EditResult(state, TaskStatus.NEED_DECISION, eng, pr=pr,
                           note=f"Host 暂不 Merge: {decision.reason}",
                           events=self._events)
+
+    def _maybe_restart(self, eng: Artifact) -> None:
+        """F-E.6:Merge 后据改动范围决定是否需重启;发 restart_required 信号。
+
+        改动若落在 backend/** 或 frontend/** 才需重启;纯角色 YAML/提示词改动
+        Runtime 下次调用即生效,无需重启。受 edit_auto_restart_enabled 闸门控制:
+        闸门关 → restarter 回 dry-run(restart_required),由 Host 手动重启;
+        闸门开 → 脱离当前进程真正重启,health 失败回滚。
+        """
+        files = list(eng.artifact.files or [])
+        scope = _restart_scope(files)
+        if scope is None:
+            return
+        result: dict[str, Any] = {}
+        if self._restarter is not None:
+            try:
+                result = self._restarter.restart(scope).as_dict()
+            except Exception as exc:  # noqa: BLE001 — 重启失败不拖垮收口
+                result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        self._emit("restart_required", scope=scope, files=sorted(files),
+                   restart=result)
 
     def _need_decision(self, state: CompanyState, note: str,
                        final: Artifact | None, branch: str,

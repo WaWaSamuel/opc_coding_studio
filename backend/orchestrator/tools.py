@@ -18,9 +18,64 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from backend.errors import OpcError
+
+# ── F-E.7 写路径策略:Edit 自改代码纳管"当前项目全量代码"────────────
+# 可写白名单(相对仓库根的前缀):系统自身代码 + 当前项目前后端。
+WRITE_ALLOW_PREFIXES: tuple[str, ...] = (
+    "backend/", "frontend/src/", "frontend/public/", "scripts/",
+    "tests/", "docs/",
+)
+# 不可写黑名单(优先级高于白名单):运行态数据 / 密钥 / 版本元数据 / 依赖产物。
+# data/(库与日志真源)、.env(密钥)、.git/(版本元数据)绝不允许 Edit 改写。
+WRITE_DENY_PREFIXES: tuple[str, ...] = (
+    "data/", ".git/", "node_modules/", ".venv/", "frontend/node_modules/",
+    "frontend/dist/", "logs/", ".run/",
+)
+WRITE_DENY_NAMES: frozenset[str] = frozenset({".env"})
+
+
+def _norm_rel(path: str) -> str | None:
+    """归一为仓库内相对 POSIX 路径;越界(绝对/../穿越)返回 None。"""
+    raw = (path or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/") or raw.startswith("~"):
+        return None
+    p = PurePosixPath(raw)
+    if any(part == ".." for part in p.parts):
+        return None
+    return p.as_posix()
+
+
+def check_write_path(path: str) -> str | None:
+    """F-E.7 写路径裁决。返回拒绝原因(命中黑名单/越界/不在白名单);None 表示可写。"""
+    rel = _norm_rel(path)
+    if rel is None:
+        return f"路径越界或非法(绝对路径/../穿越):{path}"
+    if rel in WRITE_DENY_NAMES or PurePosixPath(rel).name in WRITE_DENY_NAMES:
+        return f"命中黑名单文件(密钥/不可改):{rel}"
+    for deny in WRITE_DENY_PREFIXES:
+        if rel.startswith(deny):
+            return f"命中黑名单目录(运行态数据/版本元数据):{rel}"
+    for allow in WRITE_ALLOW_PREFIXES:
+        if rel.startswith(allow):
+            return None
+    return f"不在可写白名单内(仅 {', '.join(WRITE_ALLOW_PREFIXES)}):{rel}"
+
+
+def filter_writable(files: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """按写路径策略把 {path: content} 切成 (可写, 被拒{path: 原因})。"""
+    allowed: dict[str, str] = {}
+    denied: dict[str, str] = {}
+    for path, content in files.items():
+        reason = check_write_path(path)
+        if reason is None:
+            allowed[path] = content
+        else:
+            denied[path] = reason
+    return allowed, denied
 
 
 class ToolPermissionDenied(OpcError):
@@ -62,7 +117,9 @@ ROLE_TOOL_WHITELIST: dict[str, set[str]] = {
     "loop-judge-agent": {"fs.read", "test.run"},
     "dev-lead-agent": {"fs.read"},
     "ceo-orchestrator-agent": set(),                         # 路由角色不碰 Tool
-    # M5 Edit 角色(改系统自身,纳管 git):
+    # M5/M6 Edit 角色(改系统自身;M6/F-E.7 纳管范围扩至当前项目全量代码:
+    #   backend/** + frontend/src/** + scripts/ + tests/ 等,写路径受 check_write_path
+    #   白/黑名单约束,data//.env/.git/ 不可写):
     #   工程师产改动(feature 分支 diff)、评审提 PR;回归官只读 + 跑测;
     #   部长只定位不直接动 git。push/PR 仍受 GitService 闸门 + Host 确认兜底。
     "edit-lead-agent": {"fs.read", "git.diff"},

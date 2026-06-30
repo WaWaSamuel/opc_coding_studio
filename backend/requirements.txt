@@ -10,6 +10,7 @@ fastapi==0.115.14
 uvicorn[standard]==0.39.0
 sse-starlette==3.0.3
 lark-oapi==1.6.9
+python-multipart==0.0.12  # M6/F-A.10 多模态图片上传(UploadFile 依赖)
 
 # 测试
 pytest==8.3.3

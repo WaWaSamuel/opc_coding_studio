@@ -39,6 +39,40 @@ _PERSIST_GRAPH_EVENTS = frozenset({
     "graph_done", "done", "error",
 })
 
+# 静态工作流 DAG(F-A.8 可视化:节点=角色/闸门,边=流转语义)。
+# 与 run() 串行链路一一对应;role 节点带 role_id 供 RoleInspector 下钻角色详情。
+_DAG_NODES = [
+    {"id": "graph_start", "label": "Host 下达需求", "kind": "entry"},
+    {"id": "ceo-orchestrator-agent", "label": "CEO 路由分流",
+     "kind": "role", "role_id": "ceo-orchestrator-agent"},
+    {"id": "pm-prd-agent", "label": "PM 产出 PRD(重大需求)",
+     "kind": "role", "role_id": "pm-prd-agent"},
+    {"id": "dev-lead-agent", "label": "开发部长拆解 TODO",
+     "kind": "role", "role_id": "dev-lead-agent"},
+    {"id": "backend-engineer-agent", "label": "工程师执行交付",
+     "kind": "role", "role_id": "backend-engineer-agent"},
+    {"id": "loop-judge-agent", "label": "质量判定(规则+语义)",
+     "kind": "gate", "role_id": "loop-judge-agent"},
+    {"id": "qa-acceptance-agent", "label": "需求验收",
+     "kind": "gate", "role_id": "qa-acceptance-agent"},
+    {"id": "summary", "label": "部长汇总回报 CEO",
+     "kind": "role", "role_id": "dev-lead-agent"},
+    {"id": "done", "label": "收口完成", "kind": "terminal"},
+]
+_DAG_EDGES = [
+    {"from": "graph_start", "to": "ceo-orchestrator-agent", "label": ""},
+    {"from": "ceo-orchestrator-agent", "to": "pm-prd-agent", "label": "重大"},
+    {"from": "ceo-orchestrator-agent", "to": "dev-lead-agent", "label": "常规"},
+    {"from": "pm-prd-agent", "to": "dev-lead-agent", "label": "PRD"},
+    {"from": "dev-lead-agent", "to": "backend-engineer-agent", "label": "TODO"},
+    {"from": "backend-engineer-agent", "to": "loop-judge-agent", "label": "交付物"},
+    {"from": "loop-judge-agent", "to": "qa-acceptance-agent", "label": "pass"},
+    {"from": "loop-judge-agent", "to": "backend-engineer-agent", "label": "reject→回退"},
+    {"from": "qa-acceptance-agent", "to": "summary", "label": "验收过"},
+    {"from": "qa-acceptance-agent", "to": "backend-engineer-agent", "label": "验收回退"},
+    {"from": "summary", "to": "done", "label": ""},
+]
+
 
 @dataclass
 class RuntimeResult:
@@ -64,6 +98,20 @@ class RuntimeGraph:
         self._bus = event_bus
         self._gate = decision_gate
         self._events: list[dict[str, Any]] = []
+
+    # --- 静态 DAG(F-A.8 可视化)---
+    @classmethod
+    def dag_spec(
+        cls, ref: str = "main", changed_targets: list[str] | None = None
+    ) -> dict[str, Any]:
+        """返回 {nodes, edges, ref};与 EditGraph.dag_spec 同构供前端统一渲染。"""
+        changed = set(changed_targets or [])
+        nodes = []
+        for n in _DAG_NODES:
+            node = dict(n)
+            node["changed"] = bool(ref != "main" and node["id"] in changed)
+            nodes.append(node)
+        return {"ref": ref, "nodes": nodes, "edges": list(_DAG_EDGES)}
 
     def _emit(self, event: str, **kw: Any) -> None:
         e = {"event": event, **kw}

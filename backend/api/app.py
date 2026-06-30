@@ -15,17 +15,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from backend.config import settings
 from backend.core.event_bus import EventBus
-from backend.gateway.host_command import HostCommand, classify_intent
+from backend.gateway.host_command import (
+    HostCommand,
+    classify_decision,
+    classify_intent,
+)
 from backend.orchestrator.service import OrchestratorService
+
+# F-A.10 多模态图片上传落点(大图走 POST /upload,小图前端内联 base64)。
+_UPLOAD_DIR = Path(settings.db_path).resolve().parent / "uploads"
+_ALLOWED_IMAGE_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp",
+})
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 单图上限 10MB
 
 
 class CommandIn(BaseModel):
@@ -35,20 +49,26 @@ class CommandIn(BaseModel):
     intent: Optional[str] = None     # 不传则按文本初判 runtime/edit
     host_verified: bool = True       # Web 默认信任(沙箱前置网关鉴权)
     attachments: list[dict[str, Any]] = []
+    messages: list[dict[str, Any]] = []  # F-A.9 多轮上下文(同 session 历史消息)
     reply_to: str = ""
 
 
 class DecisionIn(BaseModel):
     task_id: str
-    verdict: str                     # pass | reject | abort
+    verdict: str = ""                # pass | reject | abort;留空则按 text 解析
     reason: str = ""
     suggestion: str = ""
+    text: str = ""                   # F-A.7 通道①:对话式自然语言回复
 
 
 class EditPrIn(BaseModel):
     branch: str
     summary: str = ""
     badcase_ref: str = ""
+
+
+class RestartIn(BaseModel):
+    scope: str = "both"              # backend | frontend | both
 
 
 def create_app(service: OrchestratorService | None = None) -> FastAPI:
@@ -76,7 +96,8 @@ def create_app(service: OrchestratorService | None = None) -> FastAPI:
         cmd = HostCommand(
             channel="web", session_id=session_id, text=body.text,
             host_verified=body.host_verified, intent=intent,  # type: ignore[arg-type]
-            attachments=body.attachments, reply_to=body.reply_to,
+            attachments=body.attachments, messages=body.messages,
+            reply_to=body.reply_to,
         )
         try:
             task_id = svc.submit(cmd)
@@ -120,8 +141,17 @@ def create_app(service: OrchestratorService | None = None) -> FastAPI:
 
     @app.post("/decision")
     def decision(body: DecisionIn) -> dict[str, Any]:
-        ok = svc.decide(body.task_id, body.verdict, body.reason, body.suggestion)
-        return {"ok": ok, "task_id": body.task_id}
+        # F-A.7 通道①:Host 直接打字回复时,verdict 留空 → 用 classify_decision
+        # 把自然语言归一为 pass|reject|abort;无法判定返回 400 交前端按钮兜底。
+        verdict = body.verdict or (classify_decision(body.text) or "")
+        if verdict not in ("pass", "reject", "abort"):
+            raise HTTPException(
+                status_code=400,
+                detail="无法从回复解析出决策,请用按钮或更明确的措辞(通过/打回/终止)",
+            )
+        reason = body.reason or body.text
+        ok = svc.decide(body.task_id, verdict, reason, body.suggestion)
+        return {"ok": ok, "task_id": body.task_id, "verdict": verdict}
 
     @app.get("/task/{task_id}")
     def task(task_id: str) -> dict[str, Any]:
@@ -138,11 +168,59 @@ def create_app(service: OrchestratorService | None = None) -> FastAPI:
     def cost(task_id: str) -> dict[str, Any]:
         return svc.cost(task_id)
 
-    # --- Edit 系统(M5 / F-A.8 可视化 + F-E.4 受控 PR)---
+    # --- 多模态图片上传(M6 / F-A.10)---
+    @app.post("/upload")
+    async def upload(file: UploadFile) -> dict[str, Any]:
+        """接收图片 → 落 data/uploads/ → 返回可回访 url(供 attachments 透传)。
+
+        仅允许图片类型;超 10MB 拒绝。返回 {url, name, content_type, size}。
+        """
+        ctype = (file.content_type or "").lower()
+        if ctype not in _ALLOWED_IMAGE_TYPES:
+            raise HTTPException(status_code=415,
+                                detail=f"仅支持图片类型,收到 {ctype or 'unknown'}")
+        data = await file.read()
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="图片超过 10MB 上限")
+        _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+               "image/gif": ".gif", "image/webp": ".webp"}.get(ctype, ".bin")
+        name = f"{uuid.uuid4().hex}{ext}"
+        (_UPLOAD_DIR / name).write_bytes(data)
+        return {"url": f"/uploads/{name}", "name": file.filename or name,
+                "content_type": ctype, "size": len(data)}
+
+    @app.get("/uploads/{name}")
+    def serve_upload(name: str) -> FileResponse:
+        """回访已上传图片(前端预览 / 多模态模型取图)。防目录穿越。"""
+        safe = Path(name).name
+        path = _UPLOAD_DIR / safe
+        if safe != name or not path.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(str(path))
+
+    # --- Edit 系统(M5 / F-A.8 可视化 + F-E.4 受控 PR + M6 F-E.6 自重启)---
     @app.get("/edit/graph")
-    def edit_graph(ref: str = "main") -> dict[str, Any]:
-        """Edit 工作流静态 DAG(main/feature);feature ref 标改动节点做 diff 高亮。"""
-        return svc.edit_graph(ref=ref)
+    def edit_graph(ref: str = "main", workflow: str = "edit") -> dict[str, Any]:
+        """工作流静态 DAG(M6/F-A.8 多工作流全景)。
+
+        workflow ∈ {edit, runtime};feature ref 标改动节点做 diff 高亮。
+        node.role_id 供前端 RoleInspector 下钻角色详情。
+        """
+        return svc.edit_graph(ref=ref, workflow=workflow)
+
+    @app.get("/role/{role_id}")
+    def role_detail(role_id: str) -> dict[str, Any]:
+        """角色完整元数据(M6/F-A.8 RoleInspector):model_tier/职责/可调 tool。"""
+        detail = svc.role_detail(role_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="role not found")
+        return detail
+
+    @app.post("/edit/restart")
+    def edit_restart(body: RestartIn) -> dict[str, Any]:
+        """服务自重启(M6/F-E.6)。闸门关 → 回 restart_required 信号(dry-run)。"""
+        return svc.restart_service(body.scope)
 
     @app.post("/edit/pr")
     def edit_pr(body: EditPrIn) -> dict[str, Any]:

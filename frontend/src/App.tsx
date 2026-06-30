@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChatAttachment,
+  ChatMessage,
   CostResp,
   getCost,
   getTask,
+  OpcEvent,
   postCommand,
   postDecision,
+  postDecisionText,
   Verdict,
 } from "./api/client";
 import { ChatPanel } from "./components/ChatPanel";
 import { CostPanel } from "./components/CostPanel";
-import { DecisionModal } from "./components/DecisionModal";
 import { EventTimeline } from "./components/EventTimeline";
 import { GraphView } from "./components/GraphView";
 import { TodoView } from "./components/TodoView";
@@ -17,16 +20,44 @@ import { useEventStream } from "./hooks/useEventStream";
 
 const SESSION_ID = `web-${Math.random().toString(36).slice(2, 10)}`;
 
+// F-A.11 从终态事件流里凝练一句对话式回执(结论 + 产物摘要 + 耗时/tokens)。
+function buildReceipt(events: OpcEvent[]): { text: string; tone: "done" | "error" } {
+  const last = events[events.length - 1];
+  const totalTokens = events.reduce(
+    (s, e) => s + (e.tokens?.in ?? 0) + (e.tokens?.out ?? 0),
+    0,
+  );
+  const totalLatency = events.reduce((s, e) => s + (e.latency_ms ?? 0), 0);
+  const cost = `（耗时 ${totalLatency}ms · tokens ${totalTokens}）`;
+  if (last?.event === "error") {
+    return { text: `任务异常中止：${String(last.payload?.error ?? "未知错误")}`, tone: "error" };
+  }
+  // restart_required:落在 backend/frontend 的改动需重启才生效。
+  const restart = events.find((e) => e.event === "restart_required");
+  const editDone = events.find((e) => e.event === "edit_review");
+  if (editDone) {
+    const scope = restart ? `，改动落在 ${String(restart.payload?.scope)}，需重启生效` : "";
+    return {
+      text: `改系统已完成并就绪：PR 已提交待确认 Merge${scope}。${cost}`,
+      tone: "done",
+    };
+  }
+  const note = String(last?.payload?.note ?? "需求已交付。");
+  return { text: `已收口：${note} ${cost}`, tone: "done" };
+}
+
 export default function App() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [cost, setCost] = useState<CostResp | null>(null);
   const [todoPlan, setTodoPlan] = useState<Array<Record<string, unknown>>>([]);
   const [view, setView] = useState<"runtime" | "edit">("runtime");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const { events, done, error } = useEventStream(taskId);
+  const receiptDone = useRef<string | null>(null);
 
   // 当前是否在等待人在环决策(最近一条是 need_decision 且其后没有 decision)
   const pendingDecision = useMemo(() => {
-    let pending: (typeof events)[number] | null = null;
+    let pending: OpcEvent | null = null;
     for (const e of events) {
       if (e.event === "need_decision") pending = e;
       if (e.event === "decision" || e.event === "done") pending = null;
@@ -36,14 +67,22 @@ export default function App() {
 
   const running = taskId !== null && !done;
 
-  // 任务结束:拉成本与快照(TODO 真源)
+  // 任务结束:拉成本与快照(TODO 真源)+ 落一条对话式回执气泡(F-A.11)
   useEffect(() => {
     if (!taskId || !done) return;
     getCost(taskId).then(setCost).catch(() => undefined);
     getTask(taskId)
       .then((s) => setTodoPlan((s.todo_plan as Array<Record<string, unknown>>) || []))
       .catch(() => undefined);
-  }, [taskId, done]);
+    if (receiptDone.current !== taskId && events.length > 0) {
+      receiptDone.current = taskId;
+      const { text, tone } = buildReceipt(events);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text, ts: Date.now(), tone },
+      ]);
+    }
+  }, [taskId, done, events]);
 
   // dev_plan 事件到达即异步拉一次快照,让 TODO 早点出现
   useEffect(() => {
@@ -54,10 +93,37 @@ export default function App() {
     }
   }, [events, taskId, todoPlan.length]);
 
-  const onSubmit = async (text: string) => {
+  const onSubmit = async (text: string, attachments: ChatAttachment[]) => {
+    // F-A.7 通道①:任务在等决策时,把这条对话当作自然语言决策回复优先解析。
+    if (pendingDecision && taskId && !done) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "host", text, ts: Date.now(), attachments },
+      ]);
+      const verdict = await postDecisionText(taskId, text).catch(() => null);
+      if (!verdict) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            text: "没读懂你的决策意图，请点上方按钮，或用更明确的措辞（通过 / 打回 / 终止）。",
+            ts: Date.now(),
+          },
+        ]);
+      }
+      return;
+    }
+
     setCost(null);
     setTodoPlan([]);
-    const resp = await postCommand(text, SESSION_ID, view);
+    const hostMsg: ChatMessage = { role: "host", text, ts: Date.now(), attachments };
+    const nextMessages = [...messages, hostMsg];
+    setMessages(nextMessages);
+    // F-A.9 多轮:把已有对话历史 + 本条一起透传(同 session 上下文延续)。
+    const resp = await postCommand(text, SESSION_ID, view, {
+      messages: nextMessages,
+      attachments,
+    });
     setTaskId(resp.task_id);
   };
 
@@ -96,7 +162,13 @@ export default function App() {
       {view === "edit" ? (
         <div className="grid">
           <div className="col-left">
-            <ChatPanel onSubmit={onSubmit} disabled={running} />
+            <ChatPanel
+              messages={messages}
+              onSubmit={onSubmit}
+              disabled={running && !pendingDecision}
+              pendingDecision={pendingDecision}
+              onDecide={onDecide}
+            />
             <GraphView />
           </div>
           <div className="col-right">
@@ -106,7 +178,13 @@ export default function App() {
       ) : (
         <div className="grid">
           <div className="col-left">
-            <ChatPanel onSubmit={onSubmit} disabled={running} />
+            <ChatPanel
+              messages={messages}
+              onSubmit={onSubmit}
+              disabled={running && !pendingDecision}
+              pendingDecision={pendingDecision}
+              onDecide={onDecide}
+            />
             <TodoView events={events} todoPlan={todoPlan} />
             <CostPanel cost={cost} />
           </div>
@@ -115,8 +193,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {pendingDecision && <DecisionModal event={pendingDecision} onDecide={onDecide} />}
     </div>
   );
 }

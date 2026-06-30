@@ -181,15 +181,32 @@ class GitService:
 
     # --- 改动落盘 + 提交 ---
     def apply_changes(self, files: dict[str, str]) -> GitResult:
-        """把 {相对路径: 内容} 写入工作树(纳管 agents/orchestrator/skills/templates)。"""
-        self._record("apply_changes", files=sorted(files.keys()))
+        """把 {相对路径: 内容} 写入工作树。
+
+        F-E.7:Edit 自改代码纳管当前项目全量代码,但写路径受 check_write_path
+        白/黑名单兜底——data//.env/.git/ 等绝不允许被改写,越界/穿越路径直接拒绝。
+        被拒文件不落盘,原因记入 plan 留痕(防御纵深:即便上游放过也在此拦截)。
+        """
+        from backend.orchestrator.tools import filter_writable
+
+        allowed, denied = filter_writable(files)
+        if denied:
+            self._record("write_denied", files=sorted(denied.keys()),
+                         reasons=denied)
+        self._record("apply_changes", files=sorted(allowed.keys()))
         if not self._enabled:
-            return GitResult(True, note=f"[dry-run] 计划写 {len(files)} 个文件")
-        for rel, content in files.items():
+            note = f"[dry-run] 计划写 {len(allowed)} 个文件"
+            if denied:
+                note += f"(拒写 {len(denied)} 个越界/黑名单文件)"
+            return GitResult(True, note=note)
+        for rel, content in allowed.items():
             p = self._dir / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
-        return GitResult(True, note=f"已写 {len(files)} 个文件")
+        note = f"已写 {len(allowed)} 个文件"
+        if denied:
+            note += f"(拒写 {len(denied)} 个越界/黑名单文件)"
+        return GitResult(True, note=note)
 
     def commit(self, message: str, files: list[str] | None = None) -> GitResult:
         self._record("commit", message=message.splitlines()[0], files=files)
