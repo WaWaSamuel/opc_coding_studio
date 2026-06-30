@@ -11,7 +11,7 @@ services:
       - ./data:/app/data            # SQLite 状态/日志/记忆持久化
       - ./workflows:/app/workflows  # 业务工作流定义(git 真源)
     ports:
-      - "8000:8000"                 # Web 渠道 + 界面 API(开发期直连后端用)
+      - "8001:8001"                 # Web 渠道 + 界面 API(开发期直连后端用)
     restart: unless-stopped
 
   frontend:         # Vite 构建产物 + nginx 静态服务(/api 反代到 backend)
@@ -19,5 +19,5 @@ services:
     depends_on:
       - backend
     ports:
-      - "5173:80"
+      - "5174:80"
     restart: unless-stopped

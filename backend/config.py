@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # API 服务(M4 入口层 / 界面)
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8001
     cors_allow_origins: str = "*"   # 前端开发期放开;生产收敛到具体域名
 
     # 人在环决策(F-A.7):need_decision 编排线程阻塞等 Host 回灌的最长时间。

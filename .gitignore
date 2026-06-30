@@ -13,3 +13,7 @@ venv/
 .env
 data/
 *.db
+
+# 运行态(opc.sh 脚本产物)
+.run/
+logs/

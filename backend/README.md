@@ -71,7 +71,7 @@ python -m backend.run_m3_harness
 
 # M4 入口层服务(Web + 飞书长连接)。一处装配 OrchestratorService,多渠道复用。
 # 默认 web + lark(有 LARK_* 凭据自动连飞书);只起 Web 用 OPC_ENABLE_LARK=0。
-python -m backend.main          # → http://localhost:8000(/health /command /events SSE /decision /cost)
+python -m backend.main          # → http://localhost:8001(/health /command /events SSE /decision /cost)
 ```
 
 ## M4 前端界面(React + Vite,在 `frontend/` 下)
@@ -79,7 +79,7 @@ python -m backend.main          # → http://localhost:8000(/health /command /ev
 ```bash
 cd frontend
 npm install
-npm run dev      # 开发期:http://localhost:5173,/api 自动代理到后端 8000
+npm run dev      # 开发期:http://localhost:5174,/api 自动代理到后端 8001
 npm run build    # 产物到 frontend/dist(容器镜像构建用)
 ```
 
@@ -87,8 +87,8 @@ npm run build    # 产物到 frontend/dist(容器镜像构建用)
 
 ```bash
 cp .env.example .env          # 填入真实 ARK_* / LARK_* 等;.env 已 gitignore
-docker compose up --build     # backend(8000)+ frontend(5173,nginx /api 反代后端)
-# 打开 http://localhost:5173 即用 Web 界面;飞书长连接随 backend 自动建立(有凭据时)。
+docker compose up --build     # backend(8001)+ frontend(5174,nginx /api 反代后端)
+# 打开 http://localhost:5174 即用 Web 界面;飞书长连接随 backend 自动建立(有凭据时)。
 ```
 
 > 网络约束(PRD §5.7):沙箱内不得起对外监听;飞书长连接是**出站** WebSocket,

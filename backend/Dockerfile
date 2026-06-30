@@ -17,7 +17,7 @@ COPY . /app/backend/
 # 持久化与工作流挂载点(compose volumes 覆盖)
 RUN mkdir -p /app/data /app/workflows
 
-EXPOSE 8000
+EXPOSE 8001
 
 # main.py 一处装配 OrchestratorService:Web(uvicorn)+ 飞书长连接(后台线程)
 # 飞书长连接出站 WebSocket,免公网回调;有 LARK_* 凭据即自动启用。
